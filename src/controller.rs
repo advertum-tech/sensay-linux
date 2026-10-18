@@ -89,6 +89,11 @@ impl DictationController {
         }
     }
 
+    /// From the Settings window; used from the next press on.
+    pub fn set_microphone(&mut self, microphone: Microphone) {
+        self.microphone = microphone;
+    }
+
     pub fn handle(&mut self, event: ControllerEvent) {
         match event {
             ControllerEvent::StopWaiting(tag) => self.stop_waiting(&tag),

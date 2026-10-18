@@ -78,8 +78,7 @@ pub struct Input {
     pub built_in: bool,
 }
 
-/// Every source plus the server's default, as the Settings window (step 6)
-/// will show them.
+/// Every source plus the server's default, as the Settings window shows them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Inputs {
     pub list: Vec<Input>,
@@ -208,8 +207,7 @@ impl AudioRecorder {
     }
 
     /// Current microphones, kept up to date as they come and go. Read by the
-    /// Settings window (step 6).
-    #[allow(dead_code)]
+    /// Settings window.
     pub fn inputs(&self) -> watch::Receiver<Inputs> {
         self.inputs.clone()
     }

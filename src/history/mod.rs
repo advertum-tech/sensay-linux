@@ -105,8 +105,6 @@ impl Transcript {
 
 /// What a watcher is told.
 #[derive(Debug, Clone)]
-// Read by the history window from step 6 on.
-#[allow(dead_code)]
 pub enum Change {
     Added(Transcript),
     Changed(Transcript),
@@ -144,8 +142,6 @@ impl History {
     }
 
     /// Changes from now on.
-    // The history window subscribes from step 6 on.
-    #[allow(dead_code)]
     pub fn watch(&self) -> broadcast::Receiver<Change> {
         self.changes.subscribe()
     }
@@ -189,6 +185,14 @@ impl History {
         match self.run(move |store| store.update(&written)).await {
             Ok(()) => self.announce(Change::Changed(row.clone())),
             Err(error) => log::error!(Storage, "could not update row {}: {error}", row.id),
+        }
+    }
+
+    /// Removes the row. The caller deletes the audio file: the two go together.
+    pub async fn remove(&self, id: i64) {
+        match self.run(move |store| store.delete(id)).await {
+            Ok(()) => self.announce(Change::Removed(id)),
+            Err(error) => log::error!(Storage, "could not delete row {id}: {error}"),
         }
     }
 

@@ -1,6 +1,8 @@
 // Settings file: $XDG_CONFIG_HOME/sensay/config.toml, mode 0600.
 //
-// Written with the defaults when missing. Read once at launch. A value that
+// Written with the defaults when missing, read at launch, and written again
+// whenever the Settings window changes a value; the app picks the change up
+// at once. Edits by hand count from the next launch. A value that
 // is missing falls back to its default quietly; a value that is there but not
 // one of the known ones falls back too and is written to the log, as
 // Settings.activationKey().unknownValue is on macOS.
@@ -25,6 +27,17 @@ pub enum SpeechService {
 
 impl SpeechService {
     const FALLBACK: SpeechService = SpeechService::Local;
+
+    /// In the order the Settings window lists them.
+    pub const ALL: [SpeechService; 3] = [SpeechService::Whisper, SpeechService::Parakeet, SpeechService::Local];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            SpeechService::Whisper => "Whisper",
+            SpeechService::Parakeet => "Parakeet",
+            SpeechService::Local => "Local",
+        }
+    }
 
     fn parse(raw: &str) -> Option<SpeechService> {
         match raw {
@@ -133,6 +146,25 @@ impl ActivationKey {
     const FALLBACK: ActivationKey = ActivationKey::CtrlSuper;
     const CTRL_SUPER: &'static str = "ctrl+super";
 
+    /// Every choice, in the order the Settings window lists them.
+    pub fn choices() -> Vec<ActivationKey> {
+        std::iter::once(ActivationKey::CtrlSuper)
+            .chain(ACTIVATION_KEYS.iter().copied().map(ActivationKey::Single))
+            .collect()
+    }
+
+    pub fn title(self) -> String {
+        match self {
+            ActivationKey::CtrlSuper => "Ctrl+Super".to_string(),
+            ActivationKey::Single("KEY_RIGHTCTRL") => "Right Ctrl".to_string(),
+            ActivationKey::Single("KEY_RIGHTALT") => "Right Alt".to_string(),
+            ActivationKey::Single("KEY_RIGHTSHIFT") => "Right Shift".to_string(),
+            ActivationKey::Single("KEY_SCROLLLOCK") => "Scroll Lock".to_string(),
+            ActivationKey::Single("KEY_PAUSE") => "Pause".to_string(),
+            ActivationKey::Single(name) => name.trim_start_matches("KEY_").to_string(),
+        }
+    }
+
     fn parse(raw: &str) -> Option<ActivationKey> {
         if raw == Self::CTRL_SUPER {
             return Some(ActivationKey::CtrlSuper);
@@ -154,6 +186,7 @@ impl fmt::Display for ActivationKey {
     }
 }
 
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub speech_service: SpeechService,
     /// Empty means the request goes without an authorization header.
@@ -173,23 +206,54 @@ impl Default for Config {
     }
 }
 
-// Written when the file does not exist. Must agree with Config::default().
-const DEFAULT_FILE: &str = r#"# Sensay settings. Read once at launch: restart Sensay after a change.
+/// The file as it is written, with these values.
+fn render(config: &Config) -> String {
+    let quote = |value: &str| toml::Value::String(value.to_string()).to_string();
+    format!(
+        r#"# Sensay settings. The Settings window writes here; edits by hand count
+# from the next launch.
 
 # Speech service: "whisper", "parakeet" or "local".
-speech_service = "local"
+speech_service = {}
 
 # Sent as X-Api-Key and as Authorization: Bearer when not empty.
-api_key = ""
+api_key = {}
 
 # "ctrl+super" (hold either Ctrl with either Super), or one evdev key name:
 # KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT, KEY_SCROLLLOCK, KEY_PAUSE,
 # KEY_F13 ... KEY_F24.
-activation_key = "ctrl+super"
+activation_key = {}
 
 # "built-in", "auto" or "name:<PulseAudio source name>".
-microphone = "built-in"
-"#;
+microphone = {}
+"#,
+        quote(config.speech_service.as_str()),
+        quote(&config.api_key),
+        quote(&config.activation_key.to_string()),
+        quote(&config.microphone.to_string()),
+    )
+}
+
+/// Writes the settings. Written beside the file and renamed over it, so a
+/// crash never leaves half a file; mode 0600, the file holds the API key.
+pub fn save(config: &Config) -> io::Result<()> {
+    let path = path().ok_or_else(|| io::Error::other("neither XDG_CONFIG_HOME nor HOME is set"))?;
+    if let Some(dir) = path.parent() {
+        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    let temporary = path.with_extension("toml.new");
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(render(config).as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&temporary, &path)
+}
 
 // Every field is a raw value, so a wrong type is reported like an unknown
 // value instead of failing the whole file.
@@ -253,7 +317,7 @@ fn create(path: &Path) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    file.write_all(DEFAULT_FILE.as_bytes())
+    file.write_all(render(&Config::default()).as_bytes())
 }
 
 /// The file holds the API key, so it is kept readable by its owner only.

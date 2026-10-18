@@ -84,7 +84,7 @@ pub async fn send(connection: &Connection, command: Command) -> zbus::Result<()>
     match command {
         Command::OpenSettings => app.open_settings().await,
         Command::OpenHistory => app.open_history().await,
-        Command::Quit => Ok(()),
+        Command::SettingsChanged | Command::Quit => Ok(()),
     }
 }
 

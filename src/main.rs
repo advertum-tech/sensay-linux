@@ -7,12 +7,15 @@
 //   sensay history    open the history of the running app
 //   sensay setup      one-time system setup (step 8)
 //
-// Threads: the main thread runs tokio (D-Bus, tray, signals); the activation
-// key is read on a std thread of its own and arrives here over a channel;
-// sound is recorded on a std thread named audio (libpulse).
+// Threads: the main thread draws the Settings and History windows (eframe,
+// which winit wants on the main thread); tokio runs everything else on its
+// own threads (D-Bus, tray, recognition, signals); the activation key is read
+// on a std thread of its own; sound is recorded on a std thread named audio
+// (libpulse).
 
 mod asr;
 mod audio;
+mod autostart;
 mod bus;
 mod config;
 mod controller;
@@ -24,9 +27,11 @@ mod paste;
 mod paths;
 mod pill;
 mod tray;
+mod ui;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -41,12 +46,15 @@ use crate::history::History;
 use crate::paste::TextSink;
 use crate::pill::Pill;
 use crate::hotkey::{Hotkey, HotkeyEvent};
+use crate::ui::{Bridge, UiCommand, WindowKind};
 
-/// What the tray menu and the D-Bus methods ask of the app.
+/// What the tray menu, the D-Bus methods and the windows ask of the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     OpenSettings,
     OpenHistory,
+    /// The Settings window changed the shared settings.
+    SettingsChanged,
     Quit,
 }
 
@@ -82,7 +90,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = runtime.block_on(run(mode));
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let app = runtime.spawn(async move {
+        let code = run(mode, ui_tx.clone()).await;
+        let _ = ui_tx.send(UiCommand::Quit);
+        code
+    });
+    ui::run(ui_rx);
+    let code = runtime.block_on(app).unwrap_or(ExitCode::FAILURE);
     runtime.shutdown_timeout(Duration::from_millis(500));
     code
 }
@@ -102,7 +117,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Mode, String> 
     }
 }
 
-async fn run(mode: Mode) -> ExitCode {
+async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
     let (commands_tx, mut commands) = mpsc::unbounded_channel();
 
     let connection = match bus::claim(commands_tx.clone()).await {
@@ -149,7 +164,7 @@ async fn run(mode: Mode) -> ExitCode {
     );
 
     let (hotkey_tx, mut hotkey_events) = mpsc::unbounded_channel();
-    let hotkey = Hotkey::start(config.activation_key, hotkey_tx);
+    let mut hotkey = Some(Hotkey::start(config.activation_key, hotkey_tx.clone()));
 
     let recorder = AudioRecorder::open().await;
     let pill = Pill::start(connection.as_ref(), recorder.level()).await;
@@ -175,13 +190,30 @@ async fn run(mode: Mode) -> ExitCode {
         }
     };
 
-    // Read by the queue at the moment each row is sent. The Settings window
-    // (step 6) writes here.
-    let (_service_settings, service_settings) = tokio::sync::watch::channel(ServiceSettings {
+    // Read by the queue at the moment each row is sent; the Settings window
+    // changes it through the shared settings.
+    let (service_settings_tx, service_settings) = tokio::sync::watch::channel(ServiceSettings {
         service: config.speech_service,
         api_key: config.api_key.clone(),
     });
     let recogniser = Recogniser::new(service_settings);
+    let sink = TextSink::new(connection.as_ref());
+
+    // The settings as the app runs with them: the Settings window writes
+    // here, and `applied` is what the parts of the app were last told.
+    let shared_config = Arc::new(Mutex::new(config.clone()));
+    let mut applied = config.clone();
+
+    let _ = ui.send(UiCommand::Ready(Box::new(Bridge {
+        runtime: tokio::runtime::Handle::current(),
+        config: shared_config.clone(),
+        inputs: recorder.inputs(),
+        history: history.clone(),
+        recogniser: recogniser.clone(),
+        sink: sink.clone(),
+        commands: commands_tx.clone(),
+        connection: connection.clone(),
+    })));
 
     let (controller_tx, mut controller_events) = mpsc::unbounded_channel();
     let mut controller = DictationController::new(
@@ -191,7 +223,7 @@ async fn run(mode: Mode) -> ExitCode {
         controller_tx,
         history,
         recogniser,
-        TextSink::new(connection.as_ref()),
+        sink,
     );
 
     // `sensay settings` or `sensay history` with no app running: this process
@@ -215,10 +247,39 @@ async fn run(mode: Mode) -> ExitCode {
             Some(event) = controller_events.recv() => controller.handle(event),
             Some(command) = commands.recv() => match command {
                 Command::OpenSettings => {
-                    log::info!(App, "open settings: no settings window yet (step 6)");
+                    let _ = ui.send(UiCommand::Show(WindowKind::Settings));
                 }
                 Command::OpenHistory => {
-                    log::info!(App, "open history: no history window yet (step 6)");
+                    let _ = ui.send(UiCommand::Show(WindowKind::History));
+                }
+                Command::SettingsChanged => {
+                    let wanted = shared_config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                    if wanted.speech_service != applied.speech_service || wanted.api_key != applied.api_key {
+                        log::info!(
+                            App,
+                            "settings: speech_service={} api_key={}",
+                            wanted.speech_service.as_str(),
+                            if wanted.api_key.is_empty() { "empty" } else { "set" }
+                        );
+                        service_settings_tx.send_replace(ServiceSettings {
+                            service: wanted.speech_service,
+                            api_key: wanted.api_key.clone(),
+                        });
+                    }
+                    if wanted.activation_key != applied.activation_key {
+                        log::info!(App, "settings: activation_key={}, restarting the key listener", wanted.activation_key);
+                        if let Some(old) = hotkey.take() {
+                            if tokio::task::spawn_blocking(move || old.stop()).await.is_err() {
+                                log::error!(Hotkey, "stopping the hotkey thread failed");
+                            }
+                        }
+                        hotkey = Some(Hotkey::start(wanted.activation_key, hotkey_tx.clone()));
+                    }
+                    if wanted.microphone != applied.microphone {
+                        log::info!(App, "settings: microphone={}", wanted.microphone);
+                        controller.set_microphone(wanted.microphone.clone());
+                    }
+                    applied = wanted;
                 }
                 Command::Quit => {
                     log::info!(App, "quit requested");
@@ -238,8 +299,10 @@ async fn run(mode: Mode) -> ExitCode {
 
     log::info!(App, "Sensay terminating");
 
-    if tokio::task::spawn_blocking(move || hotkey.stop()).await.is_err() {
-        log::error!(Hotkey, "stopping the hotkey thread failed");
+    if let Some(hotkey) = hotkey.take() {
+        if tokio::task::spawn_blocking(move || hotkey.stop()).await.is_err() {
+            log::error!(Hotkey, "stopping the hotkey thread failed");
+        }
     }
 
     if tokio::task::spawn_blocking(move || controller.shut_down()).await.is_err() {

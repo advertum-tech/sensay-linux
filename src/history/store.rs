@@ -122,6 +122,11 @@ impl Store {
         Ok(rows)
     }
 
+    pub fn delete(&mut self, id: i64) -> rusqlite::Result<()> {
+        self.connection.execute("DELETE FROM transcripts WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     pub fn transcript(&self, id: i64) -> rusqlite::Result<Option<Transcript>> {
         self.connection
             .query_row(&format!("SELECT {COLUMNS} FROM transcripts WHERE id = ?1"), [id], read)
