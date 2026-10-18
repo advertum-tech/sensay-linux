@@ -1,12 +1,11 @@
-// Ties the activation key to the recorder, the pill and the history, as
-// DictationController does on macOS. So far: the key starts and stops a
-// recording, and the pill shows it. Recognition joins in step 4; until then
-// a short pause stands in for the answer, so the waiting pill can be seen.
+// Ties the activation key to the recorder, the pill, the recognition and the
+// history, as DictationController does on macOS. Pasting the text joins in
+// step 5.
 //
 // Every dictation has a short tag, and every line it writes carries it as
 // "[a1b2]", so one run can be read end to end in the log.
 //
-// One thing never goes further: a press too short to hold a word.
+// One thing never reaches the history: a press too short to hold a word.
 
 use std::collections::HashSet;
 use std::collections::hash_map::RandomState;
@@ -15,8 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::audio::AudioRecorder;
+use crate::asr::recogniser::Recogniser;
+use crate::audio::{AudioRecorder, Recording};
 use crate::config::Microphone;
+use crate::history::{History, Transcript, TranscriptState};
 use crate::log;
 use crate::pill::{Pill, PillState};
 
@@ -24,14 +25,15 @@ use crate::pill::{Pill, PillState};
 /// Matches shortestSentRecording on macOS.
 const SHORTEST_SENT_RECORDING: f64 = 0.3;
 
-/// Stands in for recognition until step 4: the answer "arrives" this long
-/// after the recording is written.
-const RECOGNITION_STAND_IN: Duration = Duration::from_secs(2);
+/// Text that comes back later than this after the key was released goes to
+/// the history only: by then the cursor may well be somewhere else. The pill
+/// waits no longer than this either (RecognitionTiming.pasteWindow).
+const PASTE_WINDOW: Duration = Duration::from_secs(15);
 
 /// What the controller has the main loop bring back to it later.
 pub enum ControllerEvent {
-    /// The text for this dictation is in. For now: the stand-in pause is over.
-    Answered(String),
+    /// The answer for this dictation is in, or the paste window is over.
+    StopWaiting(String),
 }
 
 /// The dictation whose key is down.
@@ -51,6 +53,10 @@ pub struct DictationController {
     /// waits while there is any.
     waiting: HashSet<String>,
     events: UnboundedSender<ControllerEvent>,
+    /// None when the history could not be opened: recording still works, but
+    /// nothing is sent, as on macOS.
+    history: Option<History>,
+    recogniser: Recogniser,
 }
 
 impl DictationController {
@@ -59,6 +65,8 @@ impl DictationController {
         microphone: Microphone,
         pill: Pill,
         events: UnboundedSender<ControllerEvent>,
+        history: Option<History>,
+        recogniser: Recogniser,
     ) -> Self {
         DictationController {
             recorder,
@@ -67,15 +75,14 @@ impl DictationController {
             pill,
             waiting: HashSet::new(),
             events,
+            history,
+            recogniser,
         }
     }
 
     pub fn handle(&mut self, event: ControllerEvent) {
         match event {
-            ControllerEvent::Answered(tag) => {
-                log::info!(App, "[{tag}] no recognition yet (step 4), the wait ends here");
-                self.stop_waiting(&tag);
-            }
+            ControllerEvent::StopWaiting(tag) => self.stop_waiting(&tag),
         }
     }
 
@@ -92,9 +99,18 @@ impl DictationController {
         }
     }
 
+    /// The pill waits for each dictation no longer than the paste window: text
+    /// later than that goes to the history only, and a spinner past it would
+    /// promise a paste that is not coming.
     fn start_waiting(&mut self, tag: &str) {
         self.waiting.insert(tag.to_string());
         self.update_pill();
+        let events = self.events.clone();
+        let tag = tag.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(PASTE_WINDOW).await;
+            let _ = events.send(ControllerEvent::StopWaiting(tag));
+        });
     }
 
     /// Safe to call more than once for the same dictation.
@@ -175,11 +191,15 @@ impl DictationController {
             return;
         }
 
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(RECOGNITION_STAND_IN).await;
-            let _ = events.send(ControllerEvent::Answered(tag));
-        });
+        // From here on the key is free for the next dictation.
+        tokio::spawn(finish(
+            tag,
+            recording,
+            key_up_at,
+            self.history.clone(),
+            self.recogniser.clone(),
+            self.events.clone(),
+        ));
     }
 
     /// Drops a recording in progress and stops the audio thread. Blocks
@@ -190,6 +210,119 @@ impl DictationController {
             self.recorder.cancel();
         }
         self.recorder.close();
+    }
+}
+
+/// The rest of one dictation, after its audio is on disk: the history row,
+/// the queue, the answer.
+async fn finish(
+    tag: String,
+    recording: Recording,
+    key_up_at: Instant,
+    history: Option<History>,
+    recogniser: Recogniser,
+    events: UnboundedSender<ControllerEvent>,
+) {
+    // Every way out of here ends the wait, the early ones included.
+    let wait = WaitEnd {
+        tag: Some(tag.clone()),
+        events,
+    };
+
+    let Some(history) = history else {
+        log::warning!(App, "[{tag}] no history, the recording is not sent");
+        return;
+    };
+    let file_name = recording
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_secs_f64());
+
+    // The row goes in first, whatever happens next: a dictation the service
+    // cannot handle is still a dictation, and its audio is still on disk.
+    let Some(stored) = history
+        .add(Transcript::recorded(now, recording.duration, file_name))
+        .await
+    else {
+        return;
+    };
+    log::info!(
+        App,
+        "[{tag}] history row {} written after {} ms, queued",
+        stored.id,
+        milliseconds(key_up_at.elapsed())
+    );
+
+    let queued_at = Instant::now();
+    let Some(row) = recogniser
+        .recognise(stored, recording.path.clone(), history.clone(), tag.clone())
+        .await
+    else {
+        log::info!(App, "[{tag}] sent again from the history, this attempt dropped");
+        return;
+    };
+    log::info!(
+        App,
+        "[{tag}] service answered after {} ms in the queue, state {}",
+        milliseconds(queued_at.elapsed()),
+        row.state.as_str()
+    );
+
+    // The row first; the spinner goes as soon as the answer is in, not after
+    // the paste.
+    history.update(&row).await;
+    wait.end();
+
+    match row.state {
+        TranscriptState::Done => {
+            log::info!(Asr, "[{tag}] text: {}", row.text);
+            let waited = key_up_at.elapsed();
+            if waited > PASTE_WINDOW {
+                log::info!(
+                    App,
+                    "[{tag}] text came {:.1} s after the key, kept in the history only",
+                    waited.as_secs_f64()
+                );
+                return;
+            }
+            log::info!(App, "[{tag}] pasting comes with step 5");
+        }
+        TranscriptState::Empty => {
+            log::info!(Storage, "[{tag}] no text returned, row kept with its audio");
+        }
+        TranscriptState::Failed => {
+            let reason = row.failure_reason.as_deref().unwrap_or("Recognition failed.");
+            log::error!(App, "[{tag}] {reason}");
+        }
+        TranscriptState::Recorded | TranscriptState::Sending | TranscriptState::Recognising => {}
+    }
+}
+
+/// Ends the pill's wait for one dictation when told to, or when dropped.
+struct WaitEnd {
+    tag: Option<String>,
+    events: UnboundedSender<ControllerEvent>,
+}
+
+impl WaitEnd {
+    fn end(mut self) {
+        self.send();
+    }
+
+    fn send(&mut self) {
+        if let Some(tag) = self.tag.take() {
+            let _ = self.events.send(ControllerEvent::StopWaiting(tag));
+        }
+    }
+}
+
+impl Drop for WaitEnd {
+    fn drop(&mut self) {
+        self.send();
     }
 }
 

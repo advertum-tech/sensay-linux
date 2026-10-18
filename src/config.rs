@@ -42,6 +42,25 @@ impl SpeechService {
             SpeechService::Local => "local",
         }
     }
+
+    /// Base address; the request goes to `/v1/audio/transcriptions` under it.
+    pub fn url(self) -> &'static str {
+        match self {
+            SpeechService::Whisper => "https://whisper.hallstain.me",
+            SpeechService::Parakeet => "https://parakeet.hallstain.me",
+            SpeechService::Local => "http://127.0.0.1:9410",
+        }
+    }
+
+    /// One word for the log. Which of the three was asked is the whole
+    /// question, as logName on macOS.
+    pub fn log_name(self) -> &'static str {
+        match self {
+            SpeechService::Whisper => "hallstain-whisper",
+            SpeechService::Parakeet => "hallstain-parakeet",
+            SpeechService::Local => "localhost",
+        }
+    }
 }
 
 /// Where dictation is recorded from.

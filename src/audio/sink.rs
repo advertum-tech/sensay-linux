@@ -233,14 +233,8 @@ impl Sink {
     }
 }
 
-/// `$XDG_DATA_HOME/sensay/audio`, or `~/.local/share/sensay/audio` when the
-/// variable is unset, empty or relative. None without HOME.
 fn folder() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_DATA_HOME") {
-        Some(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".local").join("share"),
-    };
-    Some(base.join("sensay").join("audio"))
+    crate::paths::audio_folder()
 }
 
 /// `dictation-YYYY-MM-DD-HHMMSS-mmm.wav` in local time. Milliseconds, because

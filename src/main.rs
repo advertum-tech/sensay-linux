@@ -11,12 +11,15 @@
 // key is read on a std thread of its own and arrives here over a channel;
 // sound is recorded on a std thread named audio (libpulse).
 
+mod asr;
 mod audio;
 mod bus;
 mod config;
 mod controller;
 mod hotkey;
+mod history;
 mod log;
+mod paths;
 mod pill;
 mod tray;
 
@@ -29,7 +32,10 @@ use tokio::sync::mpsc;
 use zbus::Connection;
 
 use crate::audio::AudioRecorder;
+use crate::asr::ServiceSettings;
+use crate::asr::recogniser::Recogniser;
 use crate::controller::DictationController;
+use crate::history::History;
 use crate::pill::Pill;
 use crate::hotkey::{Hotkey, HotkeyEvent};
 
@@ -145,8 +151,42 @@ async fn run(mode: Mode) -> ExitCode {
 
     let tray = tokio::spawn(tray::start(commands_tx.clone()));
 
+    let history = match History::open().await {
+        Ok(history) => {
+            log::info!(
+                Storage,
+                "history open at {}",
+                paths::database_path().map(|path| path.display().to_string()).unwrap_or_default()
+            );
+            history.mark_interrupted().await;
+            // At launch, one of the two moments the sweep runs; never on the
+            // dictation path.
+            tokio::spawn(history::sweep(history.clone()));
+            Some(history)
+        }
+        Err(error) => {
+            log::error!(Storage, "could not open the history: {error}");
+            None
+        }
+    };
+
+    // Read by the queue at the moment each row is sent. The Settings window
+    // (step 6) writes here.
+    let (_service_settings, service_settings) = tokio::sync::watch::channel(ServiceSettings {
+        service: config.speech_service,
+        api_key: config.api_key.clone(),
+    });
+    let recogniser = Recogniser::new(service_settings);
+
     let (controller_tx, mut controller_events) = mpsc::unbounded_channel();
-    let mut controller = DictationController::new(recorder, config.microphone, pill, controller_tx);
+    let mut controller = DictationController::new(
+        recorder,
+        config.microphone,
+        pill,
+        controller_tx,
+        history,
+        recogniser,
+    );
 
     // `sensay settings` or `sensay history` with no app running: this process
     // becomes the app and does what was asked.
