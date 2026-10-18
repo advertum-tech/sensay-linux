@@ -15,6 +15,7 @@ mod meter;
 use tokio::sync::watch;
 use zbus::Connection;
 
+use crate::desktop::is_gnome_wayland;
 use crate::log;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub struct Pill {
 impl Pill {
     /// Name of the path the pill is drawn through, for the `backends:` line.
     pub fn backend_name() -> &'static str {
-        if gnome::is_gnome_wayland() {
+        if is_gnome_wayland() {
             "gnome-extension"
         } else {
             "none"
@@ -55,7 +56,7 @@ impl Pill {
     /// Starts the pill for this desktop. Always returns: without a way to
     /// draw it the reason goes to the log and dictation works without it.
     pub async fn start(connection: Option<&Connection>, level: watch::Receiver<f32>) -> Pill {
-        if !gnome::is_gnome_wayland() {
+        if !is_gnome_wayland() {
             log::info!(Pill, "pill: not a GNOME Wayland session, no pill on this desktop yet");
             return Pill { gnome: None };
         }

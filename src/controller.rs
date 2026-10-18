@@ -1,6 +1,5 @@
-// Ties the activation key to the recorder, the pill, the recognition and the
-// history, as DictationController does on macOS. Pasting the text joins in
-// step 5.
+// Ties the activation key to the recorder, the pill, the recognition, the
+// history and the paste, as DictationController does on macOS.
 //
 // Every dictation has a short tag, and every line it writes carries it as
 // "[a1b2]", so one run can be read end to end in the log.
@@ -8,6 +7,7 @@
 // One thing never reaches the history: a press too short to hold a word.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,7 @@ use crate::audio::{AudioRecorder, Recording};
 use crate::config::Microphone;
 use crate::history::{History, Transcript, TranscriptState};
 use crate::log;
+use crate::paste::TextSink;
 use crate::pill::{Pill, PillState};
 
 /// A recording below this is never sent: the speech service refuses it.
@@ -57,6 +58,11 @@ pub struct DictationController {
     /// nothing is sent, as on macOS.
     history: Option<History>,
     recogniser: Recogniser,
+    sink: TextSink,
+    /// Pastes go one at a time: each holds the clipboard for half a second,
+    /// and a paste started inside that time would take the first one's text
+    /// for the user's own clipboard and put the wrong thing back.
+    paste_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DictationController {
@@ -67,6 +73,7 @@ impl DictationController {
         events: UnboundedSender<ControllerEvent>,
         history: Option<History>,
         recogniser: Recogniser,
+        sink: TextSink,
     ) -> Self {
         DictationController {
             recorder,
@@ -77,6 +84,8 @@ impl DictationController {
             events,
             history,
             recogniser,
+            sink,
+            paste_turn: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -196,9 +205,13 @@ impl DictationController {
             tag,
             recording,
             key_up_at,
-            self.history.clone(),
-            self.recogniser.clone(),
-            self.events.clone(),
+            Services {
+                history: self.history.clone(),
+                recogniser: self.recogniser.clone(),
+                sink: self.sink.clone(),
+                paste_turn: self.paste_turn.clone(),
+                events: self.events.clone(),
+            },
         ));
     }
 
@@ -213,16 +226,25 @@ impl DictationController {
     }
 }
 
-/// The rest of one dictation, after its audio is on disk: the history row,
-/// the queue, the answer.
-async fn finish(
-    tag: String,
-    recording: Recording,
-    key_up_at: Instant,
+/// What the rest of a dictation needs, handed over from the controller.
+struct Services {
     history: Option<History>,
     recogniser: Recogniser,
+    sink: TextSink,
+    paste_turn: Arc<tokio::sync::Mutex<()>>,
     events: UnboundedSender<ControllerEvent>,
-) {
+}
+
+/// The rest of one dictation, after its audio is on disk: the history row,
+/// the queue, the answer, the paste.
+async fn finish(tag: String, recording: Recording, key_up_at: Instant, services: Services) {
+    let Services {
+        history,
+        recogniser,
+        sink,
+        paste_turn,
+        events,
+    } = services;
     // Every way out of here ends the wait, the early ones included.
     let wait = WaitEnd {
         tag: Some(tag.clone()),
@@ -289,7 +311,10 @@ async fn finish(
                 );
                 return;
             }
-            log::info!(App, "[{tag}] pasting comes with step 5");
+            let _turn = paste_turn.lock().await;
+            if let Err(error) = sink.deliver(&row.text, &tag).await {
+                log::error!(Paste, "[{tag}] {error}");
+            }
         }
         TranscriptState::Empty => {
             log::info!(Storage, "[{tag}] no text returned, row kept with its audio");

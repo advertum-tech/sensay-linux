@@ -16,9 +16,11 @@ mod audio;
 mod bus;
 mod config;
 mod controller;
+mod desktop;
 mod hotkey;
 mod history;
 mod log;
+mod paste;
 mod paths;
 mod pill;
 mod tray;
@@ -36,6 +38,7 @@ use crate::asr::ServiceSettings;
 use crate::asr::recogniser::Recogniser;
 use crate::controller::DictationController;
 use crate::history::History;
+use crate::paste::TextSink;
 use crate::pill::Pill;
 use crate::hotkey::{Hotkey, HotkeyEvent};
 
@@ -137,10 +140,12 @@ async fn run(mode: Mode) -> ExitCode {
     );
     log::info!(
         App,
-        "backends: hotkey={} audio={} pill={} clipboard=none keys=none",
+        "backends: hotkey={} audio={} pill={} clipboard={} keys={}",
         Hotkey::backend_name(),
         AudioRecorder::backend_name(),
-        Pill::backend_name()
+        Pill::backend_name(),
+        TextSink::backend_names().0,
+        TextSink::backend_names().1
     );
 
     let (hotkey_tx, mut hotkey_events) = mpsc::unbounded_channel();
@@ -186,6 +191,7 @@ async fn run(mode: Mode) -> ExitCode {
         controller_tx,
         history,
         recogniser,
+        TextSink::new(connection.as_ref()),
     );
 
     // `sensay settings` or `sensay history` with no app running: this process

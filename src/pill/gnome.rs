@@ -29,15 +29,6 @@ const EXTENSION_UUID: &str = "sensay-pill@sensay.app";
 /// How often the level goes out while listening: the screen's frame rate.
 const LEVEL_PERIOD: Duration = Duration::from_micros(16_667);
 
-/// XDG_CURRENT_DESKTOP names GNOME (Ubuntu says "ubuntu:GNOME") and the
-/// session is Wayland. On GNOME under X11 the X11 pill of step 7 applies.
-pub fn is_gnome_wayland() -> bool {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
-    let gnome = std::env::var("XDG_CURRENT_DESKTOP")
-        .is_ok_and(|desktops| desktops.split(':').any(|desktop| desktop.eq_ignore_ascii_case("GNOME")));
-    wayland && gnome
-}
-
 struct PillInterface {
     current: watch::Receiver<PillState>,
 }

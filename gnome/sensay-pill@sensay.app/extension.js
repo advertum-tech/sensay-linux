@@ -10,6 +10,14 @@
 //   signal    Level(d)          0...1, 60 times a second while listening
 //   method    GetState() -> s
 //
+// It also pastes the dictated text for the app (paste.js), serving
+//
+//   object    /com/advertumtech/Sensay/Shell, on GNOME Shell's connection
+//   interface com.advertumtech.Sensay.Shell
+//   method    Paste(s text) -> s report, JSON for the app's log
+//
+// to the current owner of com.advertumtech.Sensay only.
+//
 // The pill is on screen while the app owns com.advertumtech.Sensay and gone
 // when it does not. Its look and motion follow PillView.swift and Theme.swift
 // of the macOS version, with one change: the open pill is lighter, so the
@@ -28,10 +36,23 @@ import Cairo from 'cairo';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+import {Paster} from './paste.js';
+
 const BUS_NAME = 'com.advertumtech.Sensay';
 const PILL_PATH = '/com/advertumtech/Sensay/Pill';
 const PILL_INTERFACE = 'com.advertumtech.Sensay.Pill';
 const STATES = ['idle', 'listening', 'waiting'];
+
+const SHELL_PATH = '/com/advertumtech/Sensay/Shell';
+const SHELL_INTERFACE = `
+<node>
+  <interface name="com.advertumtech.Sensay.Shell">
+    <method name="Paste">
+      <arg type="s" direction="in" name="text"/>
+      <arg type="s" direction="out" name="report"/>
+    </method>
+  </interface>
+</node>`;
 
 // Geometry, in logical pixels. Every measurement comes from the height.
 const HEIGHT = 32;
@@ -550,20 +571,54 @@ class Pill {
 export default class SensayPillExtension extends Extension {
     enable() {
         this._pill = new Pill();
+        this._paster = new Paster();
+        // Unique bus name of the running app; only it may paste.
+        this._appOwner = null;
+
         this._signals = Gio.DBus.session.signal_subscribe(
             null, PILL_INTERFACE, null, PILL_PATH, null, Gio.DBusSignalFlags.NONE,
             (_connection, _sender, _path, _interface, signal, parameters) =>
                 this._pill?.onSignal(signal, parameters));
         this._watch = Gio.bus_watch_name(Gio.BusType.SESSION, BUS_NAME,
             Gio.BusNameWatcherFlags.NONE,
-            () => this._pill?.appear(),
-            () => this._pill?.vanish());
+            (_connection, _name, owner) => {
+                this._appOwner = owner;
+                this._pill?.appear();
+            },
+            () => {
+                this._appOwner = null;
+                this._pill?.vanish();
+            });
+
+        this._shell = Gio.DBusExportedObject.wrapJSObject(SHELL_INTERFACE, {
+            PasteAsync: ([text], invocation) => this._onPaste(text, invocation),
+        });
+        this._shell.export(Gio.DBus.session, SHELL_PATH);
     }
 
     disable() {
+        this._shell.unexport();
+        this._shell = null;
         Gio.bus_unwatch_name(this._watch);
         Gio.DBus.session.signal_unsubscribe(this._signals);
+        this._paster.destroy();
+        this._paster = null;
         this._pill.destroy();
         this._pill = null;
+        this._appOwner = null;
+    }
+
+    _onPaste(text, invocation) {
+        // Pressing keys in the focused window is not offered to just anyone
+        // on the bus.
+        if (!this._appOwner || invocation.get_sender() !== this._appOwner) {
+            invocation.return_dbus_error('com.advertumtech.Sensay.Error.Denied',
+                'Only the running Sensay app may paste.');
+            return;
+        }
+        this._paster.paste(text).then(
+            report => invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(report)])),
+            error => invocation.return_dbus_error('com.advertumtech.Sensay.Error.Failed',
+                String(error?.message ?? error)));
     }
 }
