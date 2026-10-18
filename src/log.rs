@@ -20,7 +20,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 const IDENTIFIER: &str = "sensay";
 
 /// Values of the SENSAY_CATEGORY field.
-// Pill, Asr and Paste are written from steps 3, 4 and 5 on.
+// Asr and Paste are written from steps 4 and 5 on.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum Category {

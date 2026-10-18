@@ -17,6 +17,7 @@ mod config;
 mod controller;
 mod hotkey;
 mod log;
+mod pill;
 mod tray;
 
 use std::ffi::OsString;
@@ -29,6 +30,7 @@ use zbus::Connection;
 
 use crate::audio::AudioRecorder;
 use crate::controller::DictationController;
+use crate::pill::Pill;
 use crate::hotkey::{Hotkey, HotkeyEvent};
 
 /// What the tray menu and the D-Bus methods ask of the app.
@@ -129,19 +131,22 @@ async fn run(mode: Mode) -> ExitCode {
     );
     log::info!(
         App,
-        "backends: hotkey={} audio={} pill=none clipboard=none keys=none",
+        "backends: hotkey={} audio={} pill={} clipboard=none keys=none",
         Hotkey::backend_name(),
-        AudioRecorder::backend_name()
+        AudioRecorder::backend_name(),
+        Pill::backend_name()
     );
 
     let (hotkey_tx, mut hotkey_events) = mpsc::unbounded_channel();
     let hotkey = Hotkey::start(config.activation_key, hotkey_tx);
 
     let recorder = AudioRecorder::open().await;
+    let pill = Pill::start(connection.as_ref(), recorder.level()).await;
 
     let tray = tokio::spawn(tray::start(commands_tx.clone()));
 
-    let mut controller = DictationController::new(recorder, config.microphone);
+    let (controller_tx, mut controller_events) = mpsc::unbounded_channel();
+    let mut controller = DictationController::new(recorder, config.microphone, pill, controller_tx);
 
     // `sensay settings` or `sensay history` with no app running: this process
     // becomes the app and does what was asked.
@@ -161,6 +166,7 @@ async fn run(mode: Mode) -> ExitCode {
                 HotkeyEvent::Down => controller.key_down().await,
                 HotkeyEvent::Up => controller.key_up().await,
             },
+            Some(event) = controller_events.recv() => controller.handle(event),
             Some(command) = commands.recv() => match command {
                 Command::OpenSettings => {
                     log::info!(App, "open settings: no settings window yet (step 6)");

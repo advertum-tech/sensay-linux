@@ -1,23 +1,38 @@
 // Ties the activation key to the recorder, the pill and the history, as
 // DictationController does on macOS. So far: the key starts and stops a
-// recording. Recognition joins in step 4, the pill in step 3.
+// recording, and the pill shows it. Recognition joins in step 4; until then
+// a short pause stands in for the answer, so the waiting pill can be seen.
 //
 // Every dictation has a short tag, and every line it writes carries it as
 // "[a1b2]", so one run can be read end to end in the log.
 //
 // One thing never goes further: a press too short to hold a word.
 
+use std::collections::HashSet;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::audio::AudioRecorder;
 use crate::config::Microphone;
 use crate::log;
+use crate::pill::{Pill, PillState};
 
 /// A recording below this is never sent: the speech service refuses it.
 /// Matches shortestSentRecording on macOS.
 const SHORTEST_SENT_RECORDING: f64 = 0.3;
+
+/// Stands in for recognition until step 4: the answer "arrives" this long
+/// after the recording is written.
+const RECOGNITION_STAND_IN: Duration = Duration::from_secs(2);
+
+/// What the controller has the main loop bring back to it later.
+pub enum ControllerEvent {
+    /// The text for this dictation is in. For now: the stand-in pause is over.
+    Answered(String),
+}
 
 /// The dictation whose key is down.
 struct Dictation {
@@ -31,14 +46,61 @@ pub struct DictationController {
     /// microphone plugged in since launch is found.
     microphone: Microphone,
     current: Option<Dictation>,
+    pill: Pill,
+    /// Dictations whose key is up and whose text has not come back. The pill
+    /// waits while there is any.
+    waiting: HashSet<String>,
+    events: UnboundedSender<ControllerEvent>,
 }
 
 impl DictationController {
-    pub fn new(recorder: AudioRecorder, microphone: Microphone) -> Self {
+    pub fn new(
+        recorder: AudioRecorder,
+        microphone: Microphone,
+        pill: Pill,
+        events: UnboundedSender<ControllerEvent>,
+    ) -> Self {
         DictationController {
             recorder,
             microphone,
             current: None,
+            pill,
+            waiting: HashSet::new(),
+            events,
+        }
+    }
+
+    pub fn handle(&mut self, event: ControllerEvent) {
+        match event {
+            ControllerEvent::Answered(tag) => {
+                log::info!(App, "[{tag}] no recognition yet (step 4), the wait ends here");
+                self.stop_waiting(&tag);
+            }
+        }
+    }
+
+    /// The one place that decides what the pill shows. Recording wins over
+    /// waiting; waiting wins over rest.
+    fn update_pill(&self) {
+        if self.current.is_some() {
+            return;
+        }
+        if self.waiting.is_empty() {
+            self.pill.set(PillState::Idle);
+        } else {
+            self.pill.set(PillState::Waiting);
+        }
+    }
+
+    fn start_waiting(&mut self, tag: &str) {
+        self.waiting.insert(tag.to_string());
+        self.update_pill();
+    }
+
+    /// Safe to call more than once for the same dictation.
+    fn stop_waiting(&mut self, tag: &str) {
+        if self.waiting.remove(tag) {
+            self.update_pill();
         }
     }
 
@@ -53,22 +115,29 @@ impl DictationController {
         let key_down_at = Instant::now();
         log::info!(App, "[{tag}] dictation started");
 
+        self.pill.set(PillState::Listening);
         match self.recorder.start(&self.microphone, &tag).await {
             Ok(()) => {
                 log::info!(App, "[{tag}] recording after {} ms", milliseconds(key_down_at.elapsed()));
                 self.current = Some(Dictation { tag, key_down_at });
             }
-            Err(error) => log::error!(App, "[{tag}] {error}"),
+            Err(error) => {
+                log::error!(App, "[{tag}] {error}");
+                self.update_pill();
+            }
         }
     }
 
     pub async fn key_up(&mut self) {
         log::info!(Hotkey, "KEY_UP");
         let Some(dictation) = self.current.take() else {
+            self.update_pill();
             return;
         };
         let tag = dictation.tag;
         let key_up_at = Instant::now();
+        // From here until the answer: writing the file, sending it, waiting.
+        self.start_waiting(&tag);
         log::info!(
             App,
             "[{tag}] key released after {} ms",
@@ -79,6 +148,7 @@ impl DictationController {
             Ok(recording) => recording,
             Err(error) => {
                 log::error!(App, "[{tag}] {error}");
+                self.stop_waiting(&tag);
                 return;
             }
         };
@@ -101,7 +171,15 @@ impl DictationController {
                 );
             }
             log::info!(Storage, "[{tag}] shorter than {SHORTEST_SENT_RECORDING:.2} s, not sent");
+            self.stop_waiting(&tag);
+            return;
         }
+
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RECOGNITION_STAND_IN).await;
+            let _ = events.send(ControllerEvent::Answered(tag));
+        });
     }
 
     /// Drops a recording in progress and stops the audio thread. Blocks

@@ -201,9 +201,8 @@ impl AudioRecorder {
         let _ = self.send(Command::Cancel);
     }
 
-    /// Smoothed microphone level, 0...1. The pill (step 3) reads it once per
-    /// drawn frame.
-    #[allow(dead_code)]
+    /// Smoothed microphone level, 0...1. The pill reads it 60 times a second
+    /// while listening.
     pub fn level(&self) -> watch::Receiver<f32> {
         self.level.clone()
     }

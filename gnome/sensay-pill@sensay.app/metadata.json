@@ -1,0 +1,6 @@
+{
+  "uuid": "sensay-pill@sensay.app",
+  "name": "Sensay pill",
+  "description": "Draws the dictation pill of the Sensay app. Shows only while Sensay is running.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"]
+}
