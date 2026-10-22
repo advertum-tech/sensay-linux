@@ -7,16 +7,22 @@
 // over to that window, so either can be closed first. When both are closed
 // the run returns, and the thread waits for the next request. The event loop
 // is kept between runs (eframe's run_and_return).
+//
+// A window that cannot open never takes the app down. The libraries winit
+// loads while the program runs are looked for before every opening
+// (libraries.rs), and a panic inside a run is caught; after one the windows
+// stay closed until Sensay restarts, and dictation goes on.
 
 mod fonts;
 mod frame;
 mod history;
+mod libraries;
 mod settings;
 
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 use eframe::egui;
 use tokio::sync::mpsc::UnboundedSender;
@@ -29,7 +35,6 @@ use crate::config::Config;
 use crate::desktop;
 use crate::history::History;
 use crate::log;
-use crate::paste::TextSink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
@@ -53,7 +58,6 @@ pub struct Bridge {
     pub inputs: watch::Receiver<Inputs>,
     pub history: Option<History>,
     pub recogniser: Recogniser,
-    pub sink: TextSink,
     pub commands: UnboundedSender<Command>,
     /// For asking the desktop whether windows should be dark.
     pub connection: Option<zbus::Connection>,
@@ -94,6 +98,21 @@ impl Mailbox {
     }
 }
 
+/// winit takes the windows' scale on X11 from Xft.dpi alone, which Xfce at
+/// 2x leaves at 96, so it is told the scale the desktop asks for, unless
+/// WINIT_X11_SCALE_FACTOR is set already. Called before any other thread
+/// starts.
+pub fn set_x11_scale() {
+    if std::env::var_os("WINIT_X11_SCALE_FACTOR").is_some() || !desktop::windows_use_x11() {
+        return;
+    }
+    let Some(scale) = crate::x11_scale::screen() else { return };
+    // SAFETY: no other thread runs yet, so nothing reads the environment
+    // while it changes.
+    unsafe { std::env::set_var("WINIT_X11_SCALE_FACTOR", scale.value.to_string()) };
+    log::info!(App, "windows: X11 {}", scale.describe());
+}
+
 /// Runs on the main thread until the app quits.
 pub fn run(commands: Receiver<UiCommand>) {
     let mailbox = Arc::new(Mailbox {
@@ -118,6 +137,8 @@ pub fn run(commands: Receiver<UiCommand>) {
     }
 
     let mut bridge: Option<Arc<Bridge>> = None;
+    // Set once a run has panicked: winit is not used again until a restart.
+    let mut broken: Option<String> = None;
     loop {
         match mailbox.wait() {
             UiCommand::Ready(ready) => bridge = Some(Arc::from(ready)),
@@ -127,12 +148,42 @@ pub fn run(commands: Receiver<UiCommand>) {
                     log::warning!(App, "windows: {kind:?} asked for before the app was ready");
                     continue;
                 };
-                if open(kind, bridge, &mailbox) == Outcome::Quit {
-                    return;
+                if let Some(reason) = &broken {
+                    log::error!(
+                        App,
+                        "windows: {kind:?} not opened, the windows failed earlier ({reason}); they open again after a restart"
+                    );
+                    continue;
+                }
+                if let Some(reason) = libraries::missing() {
+                    log::error!(App, "windows: {kind:?} not opened, {reason}");
+                    continue;
+                }
+                match panic::catch_unwind(AssertUnwindSafe(|| open(kind, bridge, &mailbox))) {
+                    Ok(Outcome::Quit) => return,
+                    Ok(Outcome::Closed) => {}
+                    Err(payload) => {
+                        mailbox.set_context(None);
+                        let reason = panic_text(payload.as_ref());
+                        log::error!(
+                            App,
+                            "windows: failed ({reason}), no windows until Sensay restarts; dictation goes on"
+                        );
+                        broken = Some(reason);
+                    }
                 }
             }
         }
     }
+}
+
+/// The message a panic was raised with.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_string())
 }
 
 #[derive(PartialEq, Eq)]
@@ -147,6 +198,10 @@ fn open(kind: WindowKind, bridge: Arc<Bridge>, mailbox: &Arc<Mailbox>) -> Outcom
     let options = eframe::NativeOptions {
         viewport: viewport(kind),
         run_and_return: true,
+        // In the middle of the screen, as on macOS; on X11 the window manager
+        // would pick a free corner. Wayland compositors place windows
+        // themselves.
+        centered: true,
         ..Default::default()
     };
     let app_mailbox = mailbox.clone();
@@ -216,15 +271,13 @@ fn viewport(kind: WindowKind) -> egui::ViewportBuilder {
     }
 }
 
-/// What a window asks of the app after a frame.
-pub enum Action {
-    /// Close the History window, then paste this text where the cursor is.
-    PasteAndClose { text: String, id: i64 },
-}
-
 struct Windows {
     root: WindowKind,
     second: Option<WindowKind>,
+    /// Where the second window opens: over the middle of the first one.
+    /// Kept as it was at opening, so the second window does not follow the
+    /// first when that one moves.
+    second_at: Option<egui::Pos2>,
     settings: settings::SettingsWindow,
     history: history::HistoryWindow,
     bridge: Arc<Bridge>,
@@ -244,6 +297,7 @@ impl Windows {
         Windows {
             root,
             second: None,
+            second_at: None,
             settings: settings::SettingsWindow::new(),
             history: history::HistoryWindow::new(),
             bridge,
@@ -265,6 +319,10 @@ impl Windows {
                     log::info!(App, "windows: opening {kind:?}");
                     self.reset(kind);
                     self.second = Some(kind);
+                    let outer = context.input(|input| input.viewport().outer_rect);
+                    self.second_at = outer
+                        .zip(viewport(kind).inner_size)
+                        .map(|(outer, size)| outer.center() - size / 2.0);
                 }
                 UiCommand::Quit => {
                     *self.quit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
@@ -284,7 +342,7 @@ impl Windows {
         }
     }
 
-    fn draw(&mut self, kind: WindowKind, ui: &mut egui::Ui) -> Option<Action> {
+    fn draw(&mut self, kind: WindowKind, ui: &mut egui::Ui) {
         let (title, resizable, view) = match kind {
             WindowKind::Settings => ("Settings", false, false),
             WindowKind::History => ("History", true, true),
@@ -298,34 +356,8 @@ impl Windows {
             WindowKind::Settings => {
                 let height = self.settings.ui(&mut inner, &self.bridge);
                 fit(ui.ctx(), height + frame::HEADER_HEIGHT);
-                None
             }
             WindowKind::History => self.history.ui(&mut inner, &self.bridge),
-        }
-    }
-
-    fn act(&mut self, action: Action, context: &egui::Context) {
-        match action {
-            Action::PasteAndClose { text, id } => {
-                self.close(WindowKind::History, context);
-                let sink = self.bridge.sink.clone();
-                self.bridge.runtime.spawn(async move {
-                    // Long enough for the focus to go back to the window the
-                    // user was in before the history.
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    if let Err(error) = sink.deliver(&text, &format!("row{id}")).await {
-                        log::error!(Paste, "[row{id}] {error}");
-                    }
-                });
-            }
-        }
-    }
-
-    fn close(&mut self, kind: WindowKind, context: &egui::Context) {
-        if self.second == Some(kind) {
-            self.second = None;
-        } else if self.root == kind {
-            context.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 }
@@ -407,20 +439,19 @@ impl eframe::App for Windows {
         }
 
         let root = self.root;
-        let mut action = None;
         panel(root).show(ui, |ui| {
-            action = self.draw(root, ui);
+            self.draw(root, ui);
         });
-        if let Some(action) = action {
-            self.act(action, &context);
-        }
 
         if let Some(kind) = self.second {
             let mut closed = false;
-            let mut action = None;
-            context.show_viewport_immediate(viewport_id(kind), viewport(kind), |ui, _class| {
+            let mut builder = viewport(kind);
+            if let Some(at) = self.second_at {
+                builder = builder.with_position(at);
+            }
+            context.show_viewport_immediate(viewport_id(kind), builder, |ui, _class| {
                 panel(kind).show(ui, |ui| {
-                    action = self.draw(kind, ui);
+                    self.draw(kind, ui);
                 });
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     closed = true;
@@ -428,9 +459,6 @@ impl eframe::App for Windows {
             });
             if closed {
                 self.second = None;
-            }
-            if let Some(action) = action {
-                self.act(action, &context);
             }
         }
     }

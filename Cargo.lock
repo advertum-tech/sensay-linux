@@ -3455,11 +3455,15 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smithay-client-toolkit 0.20.0",
+ "tiny-skia",
  "tokio",
  "toml",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "wayland-client",
+ "x11rb",
  "zbus",
 ]
 

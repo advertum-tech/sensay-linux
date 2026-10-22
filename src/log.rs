@@ -108,4 +108,11 @@ pub fn init() {
     if let Some(error) = journald_error {
         warning!(App, "journald is not reachable ({error}), logging to stderr only");
     }
+
+    // A panic goes to the journal too, not only to the terminal.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        error!(App, "panic: {info}");
+        default_hook(info);
+    }));
 }

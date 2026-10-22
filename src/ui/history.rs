@@ -18,7 +18,7 @@ use egui::epaint::text::VariationCoords;
 use egui::{Color32, Painter, Pos2, Rect, Stroke, StrokeKind};
 
 use super::fonts::BOLD;
-use super::{Action, Bridge};
+use super::Bridge;
 use crate::history::{self, Change, History, Transcript, TranscriptState};
 use crate::log;
 use crate::paths;
@@ -27,7 +27,7 @@ use crate::paths;
 const TEXT_LEFT: f32 = 104.0;
 const INSET: f32 = 24.0;
 /// Kept clear on the right so a button never lands on the text.
-const ACTIONS_WIDTH: f32 = 168.0;
+const ACTIONS_WIDTH: f32 = 130.0;
 const PADDING: f32 = 22.0;
 const TEXT_SIZE: f32 = 15.0;
 const TIME_SIZE: f32 = 12.0;
@@ -40,7 +40,6 @@ const LIMIT: usize = 500;
 
 enum RowAction {
     Copy(i64, String),
-    Paste(i64, String),
     Again(Transcript),
     Delete(Transcript),
 }
@@ -61,10 +60,10 @@ impl HistoryWindow {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, bridge: &Bridge) -> Option<Action> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, bridge: &Bridge) {
         let Some(history) = &bridge.history else {
             centred(ui, "The history could not be opened.");
-            return None;
+            return;
         };
         if self.changes.is_none() {
             // Watched before reading, so nothing that happens in between is
@@ -78,7 +77,7 @@ impl HistoryWindow {
 
         if self.rows.is_empty() {
             centred(ui, "Nothing dictated yet.");
-            return None;
+            return;
         }
 
         let mut pending = None;
@@ -106,21 +105,14 @@ impl HistoryWindow {
             }
         }
 
-        match pending? {
+        let Some(action) = pending else { return };
+        match action {
             RowAction::Copy(id, text) => {
                 ui.ctx().copy_text(text);
                 self.copied = Some((id, Instant::now()));
-                None
             }
-            RowAction::Paste(id, text) => Some(Action::PasteAndClose { text, id }),
-            RowAction::Again(row) => {
-                transcribe_again(bridge, history, row);
-                None
-            }
-            RowAction::Delete(row) => {
-                delete(bridge, history, row);
-                None
-            }
+            RowAction::Again(row) => transcribe_again(bridge, history, row),
+            RowAction::Delete(row) => delete(bridge, history, row),
         }
     }
 
@@ -279,7 +271,6 @@ fn entry(ui: &mut egui::Ui, row: &Transcript, copied: Option<(i64, Instant)>) ->
             Icon::Copy
         };
         buttons.push((copy_icon, "Copy the text", RowAction::Copy(row.id, row.text.clone())));
-        buttons.push((Icon::Paste, "Paste at the cursor", RowAction::Paste(row.id, row.text.clone())));
     }
     // A row still waiting its turn is about to be sent anyway.
     if row.audio_file_name.is_some() && row.state != TranscriptState::Recorded {
@@ -328,14 +319,13 @@ fn entry(ui: &mut egui::Ui, row: &Transcript, copied: Option<(i64, Instant)>) ->
 enum Icon {
     Copy,
     Copied,
-    Paste,
     Again,
     Delete,
 }
 
 /// The row's icons, drawn as lines so they sit centred and sharp at any
 /// scale, after the SF Symbols of the macOS version: square.on.square, a
-/// tick, text.cursor, arrow.clockwise, trash.
+/// tick, arrow.clockwise, trash.
 fn draw_icon(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
     let stroke = Stroke::new(1.6, colour);
     let at = |x: f32, y: f32| egui::pos2(c.x + x, c.y + y);
@@ -352,14 +342,6 @@ fn draw_icon(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         }
         Icon::Copied => {
             painter.add(egui::Shape::line(vec![at(-5.5, 0.0), at(-1.5, 4.0), at(6.0, -4.5)], Stroke::new(2.0, colour)));
-        }
-        Icon::Paste => {
-            // A letter and the text cursor after it.
-            painter.add(egui::Shape::line(vec![at(-6.5, 6.0), at(-3.0, -6.0), at(0.5, 6.0)], stroke));
-            painter.line_segment([at(-5.2, 2.0), at(-0.8, 2.0)], stroke);
-            painter.line_segment([at(4.5, -6.5), at(4.5, 6.5)], stroke);
-            painter.line_segment([at(2.5, -7.0), at(6.5, -7.0)], stroke);
-            painter.line_segment([at(2.5, 7.0), at(6.5, 7.0)], stroke);
         }
         Icon::Again => {
             // An arc turning clockwise from two o'clock round to twelve, the

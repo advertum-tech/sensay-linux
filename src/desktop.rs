@@ -13,6 +13,13 @@ pub fn is_gnome_wayland() -> bool {
     wayland && gnome
 }
 
+/// Whether winit opens the windows on X11: it takes Wayland when a Wayland
+/// display is announced, X11 otherwise.
+pub fn windows_use_x11() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    !(set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET")) && set("DISPLAY")
+}
+
 /// Whether the desktop asks for dark windows, from the settings portal
 /// (`org.freedesktop.appearance color-scheme`: 1 dark, 2 light, 0 no
 /// preference, which GNOME means as light). None when the portal cannot be

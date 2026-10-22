@@ -28,6 +28,7 @@ mod paths;
 mod pill;
 mod tray;
 mod ui;
+mod x11_scale;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -82,6 +83,7 @@ fn main() -> ExitCode {
     }
 
     log::init();
+    ui::set_x11_scale();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
@@ -210,7 +212,6 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
         inputs: recorder.inputs(),
         history: history.clone(),
         recogniser: recogniser.clone(),
-        sink: sink.clone(),
         commands: commands_tx.clone(),
         connection: connection.clone(),
     })));

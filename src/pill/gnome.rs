@@ -12,22 +12,17 @@
 // and hides it when the name goes away, so quitting needs no signal.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch};
-use tokio::time::{Interval, MissedTickBehavior};
+use tokio::sync::watch;
 use zbus::Connection;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
 use super::PillState;
-use super::meter::LevelScale;
 use crate::log;
 
 const PATH: &str = "/com/advertumtech/Sensay/Pill";
 const EXTENSION_UUID: &str = "sensay-pill@sensay.app";
-/// How often the level goes out while listening: the screen's frame rate.
-const LEVEL_PERIOD: Duration = Duration::from_micros(16_667);
 
 struct PillInterface {
     current: watch::Receiver<PillState>,
@@ -46,106 +41,25 @@ impl PillInterface {
     async fn level(emitter: &SignalEmitter<'_>, level: f64) -> zbus::Result<()>;
 }
 
-pub struct GnomePill {
-    states: mpsc::UnboundedSender<PillState>,
+/// Serves the pill object on the session bus. Returns what the signals are
+/// sent with, and where GetState reads the current state.
+pub async fn serve(connection: &Connection) -> zbus::Result<(SignalEmitter<'static>, watch::Sender<PillState>)> {
+    let (current_tx, current) = watch::channel(PillState::Idle);
+    connection
+        .object_server()
+        .at(PATH, PillInterface { current })
+        .await?;
+    report_extension(connection).await;
+    let emitter = SignalEmitter::new(connection, PATH)?.into_owned();
+    Ok((emitter, current_tx))
 }
 
-impl GnomePill {
-    pub async fn start(connection: Connection, level: watch::Receiver<f32>) -> zbus::Result<GnomePill> {
-        let (current_tx, current) = watch::channel(PillState::Idle);
-        connection
-            .object_server()
-            .at(PATH, PillInterface { current })
-            .await?;
-        report_extension(&connection).await;
-
-        let emitter = SignalEmitter::new(&connection, PATH)?.into_owned();
-        let (states, states_rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(emitter, states_rx, current_tx, level));
-        Ok(GnomePill { states })
-    }
-
-    pub fn set(&self, state: PillState) {
-        // The task ends only with the app.
-        let _ = self.states.send(state);
-    }
+pub async fn emit_state(emitter: &SignalEmitter<'_>, state: PillState) -> zbus::Result<()> {
+    PillInterface::state_changed(emitter, state.as_str()).await
 }
 
-/// One task sends everything, so the extension sees the states in order.
-async fn run(
-    emitter: SignalEmitter<'static>,
-    mut states: mpsc::UnboundedReceiver<PillState>,
-    current: watch::Sender<PillState>,
-    level: watch::Receiver<f32>,
-) {
-    let mut state = PillState::Idle;
-    let mut scale = LevelScale::new();
-    let mut ticker: Option<Interval> = None;
-    let mut session_start = Instant::now();
-    let mut last_tick = Instant::now();
-    let mut send_failed = false;
-
-    loop {
-        tokio::select! {
-            next = states.recv() => {
-                let Some(next) = next else { return };
-                if next == state {
-                    continue;
-                }
-                state = next;
-                current.send_replace(next);
-                log::info!(Pill, "pill {}", next.as_str());
-                let sent = PillInterface::state_changed(&emitter, next.as_str()).await;
-                note_send(sent, &mut send_failed);
-
-                if next == PillState::Listening {
-                    scale.start_session();
-                    session_start = Instant::now();
-                    last_tick = session_start;
-                    let mut interval = tokio::time::interval(LEVEL_PERIOD);
-                    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                    ticker = Some(interval);
-                } else {
-                    ticker = None;
-                }
-            }
-            _ = tick(&mut ticker) => {
-                let now = Instant::now();
-                let dt = (now - last_tick).as_secs_f64().clamp(0.001, 0.1);
-                last_tick = now;
-                let rms = f64::from(*level.borrow());
-                let value = scale.scale(rms, dt, (now - session_start).as_secs_f64());
-                let sent = PillInterface::level(&emitter, value).await;
-                note_send(sent, &mut send_failed);
-            }
-        }
-    }
-}
-
-/// Resolves on the next tick; never, while there is no ticker.
-async fn tick(ticker: &mut Option<Interval>) {
-    match ticker {
-        Some(interval) => {
-            interval.tick().await;
-        }
-        None => std::future::pending::<()>().await,
-    }
-}
-
-/// One line for the first failure in a row, one when sending works again.
-fn note_send(result: zbus::Result<()>, failed: &mut bool) {
-    match result {
-        Ok(()) if *failed => {
-            *failed = false;
-            log::info!(Pill, "pill: sending to the extension works again");
-        }
-        Ok(()) => {}
-        Err(error) if !*failed => {
-            *failed = true;
-            log::warning!(Pill, "pill: could not send to the extension: {error}");
-        }
-        Err(_) => {}
-    }
+pub async fn emit_level(emitter: &SignalEmitter<'_>, level: f64) -> zbus::Result<()> {
+    PillInterface::level(emitter, level).await
 }
 
 /// One line on whether GNOME Shell has the extension and what state it is
