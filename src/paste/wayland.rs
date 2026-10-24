@@ -16,6 +16,12 @@
 // carries its own us keymap, and 500 ms later the old clipboard comes back if
 // it is still ours. The old content is kept in one format, as on GNOME and
 // X11. The window in focus comes from wlr-foreign-toplevel-management.
+//
+// KWin offers neither input-method-v2 nor the virtual keyboard to programs, so
+// on KDE the keys go through a keyboard of the kernel's own (uinput, which
+// needs /dev/uinput open to the input group) and the clipboard through
+// ext-data-control. KWin does not tell which window has focus, so Ctrl+V
+// goes everywhere, terminals too.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,7 +31,8 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use evdev::KeyCode;
+use evdev::uinput::VirtualDevice;
+use evdev::{AttributeSet, EventType, InputEvent, KeyCode};
 use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
@@ -392,6 +399,8 @@ struct Paster {
     device: Option<Device>,
     input_methods: Option<ZwpInputMethodManagerV2>,
     keyboard: Option<ZwpVirtualKeyboardV1>,
+    /// Where there is no virtual keyboard protocol (KDE).
+    uinput: Option<VirtualDevice>,
     _toplevels: Option<ZwlrForeignToplevelManagerV1>,
     /// For the time stamps of the virtual keys.
     born: Instant,
@@ -424,15 +433,26 @@ impl Paster {
         if let Some(keyboard) = &keyboard {
             upload_keymap(keyboard, &connection)?;
         }
+        let uinput = if keyboard.is_none() {
+            match uinput_keyboard() {
+                Ok(device) => Some(device),
+                Err(error) => {
+                    crate::log::warning!(Paste, "paste: no uinput keyboard for the paste keys: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut state = State::default();
         queue.roundtrip(&mut state).map_err(text)?;
 
         crate::log::info!(
             Paste,
-            "paste: Wayland: input-method-v2 {}, {}, virtual-keyboard {}, foreign-toplevel {}",
+            "paste: Wayland: input-method-v2 {}, {}, keys {}, foreign-toplevel {}",
             if input_methods.is_some() { "yes" } else { "no" },
             manager.as_ref().map_or("no data-control", Manager::name),
-            if keyboard.is_some() { "yes" } else { "no" },
+            if keyboard.is_some() { "virtual-keyboard" } else if uinput.is_some() { "uinput" } else { "none" },
             if toplevels.is_some() { "yes" } else { "no" },
         );
         if manager.is_none() && input_methods.is_none() {
@@ -448,6 +468,7 @@ impl Paster {
             device,
             input_methods,
             keyboard,
+            uinput,
             _toplevels: toplevels,
             born: Instant::now(),
         })
@@ -599,8 +620,8 @@ impl Paster {
         }
         report.waited_ms = Some(ms(waited));
 
-        if self.keyboard.is_none() {
-            report.keys = Some("none, the compositor has no virtual keyboard".to_string());
+        if self.keyboard.is_none() && self.uinput.is_none() {
+            report.keys = Some("none, no virtual keyboard and no uinput".to_string());
             report.restore = Some("text left on the clipboard".to_string());
             report.total_ms = Some(ms(started.elapsed()));
             return Ok(report);
@@ -788,9 +809,6 @@ impl Paster {
     }
 
     fn press_paste(&mut self, terminal: bool) -> Result<(), String> {
-        let Some(keyboard) = self.keyboard.clone() else {
-            return Err("no virtual keyboard".to_string());
-        };
         let held = if terminal { MOD_CONTROL | MOD_SHIFT } else { MOD_CONTROL };
         let mut steps = vec![(KEY_LEFTCTRL, 1, MOD_CONTROL)];
         if terminal {
@@ -806,10 +824,20 @@ impl Paster {
             if index > 0 {
                 self.pause(BETWEEN_KEYS)?;
             }
-            let time = u32::try_from(self.born.elapsed().as_millis()).unwrap_or(u32::MAX);
-            keyboard.key(time, key, pressed);
-            keyboard.modifiers(modifiers, 0, 0, 0);
-            self.connection.flush().map_err(text)?;
+            if let Some(keyboard) = &self.keyboard {
+                let time = u32::try_from(self.born.elapsed().as_millis()).unwrap_or(u32::MAX);
+                keyboard.key(time, key, pressed);
+                keyboard.modifiers(modifiers, 0, 0, 0);
+                self.connection.flush().map_err(text)?;
+            } else if let Some(device) = &mut self.uinput {
+                let code = u16::try_from(key).map_err(text)?;
+                let value = i32::try_from(pressed).map_err(text)?;
+                device
+                    .emit(&[InputEvent::new(EventType::KEY.0, code, value)])
+                    .map_err(|error| format!("uinput: {error}"))?;
+            } else {
+                return Err("no virtual keyboard and no uinput".to_string());
+            }
         }
         Ok(())
     }
@@ -851,6 +879,20 @@ fn upload_keymap(keyboard: &ZwpVirtualKeyboardV1, connection: &Connection) -> Re
     keyboard.keymap(1, file.as_fd(), size);
     connection.flush().map_err(text)?;
     Ok(())
+}
+
+/// A keyboard of the kernel's own with just the three paste keys. The
+/// compositor reads it like any other keyboard, with the user's layout; the
+/// keys are the same positions as on the virtual keyboard above.
+fn uinput_keyboard() -> io::Result<VirtualDevice> {
+    let mut keys = AttributeSet::<KeyCode>::new();
+    keys.insert(KeyCode::KEY_LEFTCTRL);
+    keys.insert(KeyCode::KEY_LEFTSHIFT);
+    keys.insert(KeyCode::KEY_V);
+    VirtualDevice::builder()?
+        .name("Sensay paste keys")
+        .with_keys(&keys)?
+        .build()
 }
 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
