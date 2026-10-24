@@ -14,7 +14,10 @@ bytes = "1"
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 wayland-client = "0.31"
-x11rb = { version = "0.13", features = ["randr", "shape"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["randr", "shape", "xtest"] }
 eframe = "0.36"
 futures-util = "0.3"
 reqwest = { version = "0.13", features = ["multipart", "stream"] }

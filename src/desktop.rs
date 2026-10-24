@@ -13,6 +13,12 @@ pub fn is_gnome_wayland() -> bool {
     wayland && gnome
 }
 
+/// A Wayland session: a Wayland display is announced.
+pub fn is_wayland() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET")
+}
+
 /// Whether winit opens the windows on X11: it takes Wayland when a Wayland
 /// display is announced, X11 otherwise.
 pub fn windows_use_x11() -> bool {

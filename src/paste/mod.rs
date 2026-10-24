@@ -1,10 +1,21 @@
-// Puts the recognised text where the cursor is: on the clipboard, then the
-// paste keys, then the old clipboard back, as ClipboardTextSink.swift.
+// Puts the recognised text where the cursor is. The whole text goes in
+// through the input method when the focused field takes it; anywhere else it
+// goes on the clipboard, then the paste keys, then the old clipboard back, as
+// ClipboardTextSink.swift. The order is in linux-spec.md, section 8.
 //
-// On GNOME Wayland no application may set the clipboard or press keys for
-// another window. GNOME Shell can, so its extension sensay-pill@sensay.app
-// does the paste (gnome/sensay-pill@sensay.app/paste.js) and this asks it to
-// over the session bus. Other desktops get their own paths in step 7.
+// On GNOME Wayland no application may commit text, set the clipboard or press
+// keys for another window. GNOME Shell can, so its extension
+// sensay-pill@sensay.app does it (gnome/sensay-pill@sensay.app/paste.js) and
+// this asks it to over the session bus. In an X11 session there is no input
+// method to hand text to, so x11.rs pastes through the clipboard. On the other
+// Wayland compositors wayland.rs hands the text to the input method or pastes
+// through data-control.
+
+mod formats;
+mod terminals;
+mod wake;
+mod wayland;
+mod x11;
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -38,22 +49,37 @@ impl fmt::Display for PasteError {
     }
 }
 
-/// What the extension tells about one paste.
+/// What one paste did, for the log: from the GNOME extension as JSON, or
+/// from the X11 path.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct Report {
+    /// "input-method" or "clipboard".
+    path: Option<String>,
     before: Option<String>,
     waited_ms: Option<u64>,
     target: Option<String>,
     keys: Option<String>,
+    /// Who read the clipboard after the keys (X11 and Wayland paths).
+    reads: Option<String>,
+    /// Why the input method did not take the text (Wayland path).
+    input_method: Option<String>,
     restore: Option<String>,
     total_ms: Option<u64>,
 }
 
 #[derive(Clone)]
+enum Path {
+    /// The session bus, to ask the GNOME extension.
+    Gnome(Connection),
+    X11(x11::X11Paste),
+    Wayland(wayland::WaylandPaste),
+    Nothing,
+}
+
+#[derive(Clone)]
 pub struct TextSink {
-    /// The session bus, on GNOME Wayland; None elsewhere for now.
-    connection: Option<Connection>,
+    path: Path,
 }
 
 impl TextSink {
@@ -61,60 +87,121 @@ impl TextSink {
     pub fn backend_names() -> (&'static str, &'static str) {
         if desktop::is_gnome_wayland() {
             ("gnome-extension", "gnome-extension")
+        } else if desktop::windows_use_x11() {
+            ("x11-selection", "xtest")
+        } else if desktop::is_wayland() {
+            ("data-control", "input-method/virtual-keyboard")
         } else {
             ("none", "none")
         }
     }
 
     pub fn new(connection: Option<&Connection>) -> TextSink {
-        TextSink {
-            connection: connection.filter(|_| desktop::is_gnome_wayland()).cloned(),
-        }
+        let path = if desktop::is_gnome_wayland() {
+            connection.cloned().map_or(Path::Nothing, Path::Gnome)
+        } else if desktop::windows_use_x11() {
+            match x11::X11Paste::start() {
+                Ok(paste) => Path::X11(paste),
+                Err(reason) => {
+                    log::error!(Paste, "paste: the X11 path could not start: {reason}");
+                    Path::Nothing
+                }
+            }
+        } else if desktop::is_wayland() {
+            match wayland::WaylandPaste::start() {
+                Ok(paste) => Path::Wayland(paste),
+                Err(reason) => {
+                    log::error!(Paste, "paste: the Wayland path could not start: {reason}");
+                    Path::Nothing
+                }
+            }
+        } else {
+            Path::Nothing
+        };
+        TextSink { path }
     }
 
     pub async fn deliver(&self, text: &str, tag: &str) -> Result<(), PasteError> {
-        let Some(connection) = &self.connection else {
-            return Err(PasteError::NoPath);
-        };
         let started = Instant::now();
-        let body = (text,);
-        let call = connection.call_method(Some(SHELL_NAME), SHELL_PATH, Some(SHELL_INTERFACE), "Paste", &body);
-        let reply = match tokio::time::timeout(CALL_TIMEOUT, call).await {
-            Err(_) => {
-                return Err(PasteError::Failed(format!(
-                    "the GNOME extension did not answer in {} s",
-                    CALL_TIMEOUT.as_secs()
-                )));
-            }
-            Ok(Err(error)) => return Err(PasteError::Failed(describe(&error))),
-            Ok(Ok(reply)) => reply,
+        let report = match &self.path {
+            Path::Nothing => return Err(PasteError::NoPath),
+            Path::Gnome(connection) => ask_extension(connection, text).await?,
+            Path::X11(paste) => finish(paste.paste(text)).await?,
+            Path::Wayland(paste) => finish(paste.paste(text)).await?,
         };
-        let report: String = reply
-            .body()
-            .deserialize()
-            .map_err(|error| PasteError::Failed(format!("unexpected answer: {error}")))?;
-        let report: Report = serde_json::from_str(&report).unwrap_or_default();
-
-        let keys = report.keys.as_deref().unwrap_or("?");
-        let target = report.target.as_deref().unwrap_or("?");
-        log::info!(Paste, "[{tag}] {keys} posted, {} characters, target {target}", text.chars().count());
-        log::info!(
-            Paste,
-            "[{tag}] was on the clipboard before: {}",
-            report.before.as_deref().unwrap_or("?")
-        );
-        if let Some(waited) = report.waited_ms.filter(|waited| *waited > 0) {
-            log::info!(Paste, "[{tag}] waited {waited} ms for held keys to be released");
-        }
-        log::info!(Paste, "[{tag}] {}", report.restore.as_deref().unwrap_or("?"));
-        log::info!(
-            Paste,
-            "[{tag}] paste done in {} ms, {} ms with the call",
-            report.total_ms.unwrap_or(0),
-            started.elapsed().as_millis()
-        );
+        log_report(tag, text, &report, started);
         Ok(())
     }
+}
+
+/// Waits for a paste thread's report, no longer than the call limit.
+async fn finish(paste: impl std::future::Future<Output = Result<Report, String>>) -> Result<Report, PasteError> {
+    match tokio::time::timeout(CALL_TIMEOUT, paste).await {
+        Err(_) => Err(PasteError::Failed(format!(
+            "the paste did not finish in {} s",
+            CALL_TIMEOUT.as_secs()
+        ))),
+        Ok(Err(reason)) => Err(PasteError::Failed(reason)),
+        Ok(Ok(report)) => Ok(report),
+    }
+}
+
+/// Hands the text to the GNOME extension and reads back its report.
+async fn ask_extension(connection: &Connection, text: &str) -> Result<Report, PasteError> {
+    let body = (text,);
+    let call = connection.call_method(Some(SHELL_NAME), SHELL_PATH, Some(SHELL_INTERFACE), "Paste", &body);
+    let reply = match tokio::time::timeout(CALL_TIMEOUT, call).await {
+        Err(_) => {
+            return Err(PasteError::Failed(format!(
+                "the GNOME extension did not answer in {} s",
+                CALL_TIMEOUT.as_secs()
+            )));
+        }
+        Ok(Err(error)) => return Err(PasteError::Failed(describe(&error))),
+        Ok(Ok(reply)) => reply,
+    };
+    let report: String = reply
+        .body()
+        .deserialize()
+        .map_err(|error| PasteError::Failed(format!("unexpected answer: {error}")))?;
+    Ok(serde_json::from_str(&report).unwrap_or_default())
+}
+
+/// The lines one paste leaves in the log, whichever path it took.
+fn log_report(tag: &str, text: &str, report: &Report, started: Instant) {
+    let target = report.target.as_deref().unwrap_or("?");
+    if report.path.as_deref() == Some("input-method") {
+        log::info!(
+            Paste,
+            "[{tag}] committed through the input method, {} characters, target {target}, clipboard not touched, done in {} ms with the call",
+            text.chars().count(),
+            started.elapsed().as_millis()
+        );
+        return;
+    }
+    if let Some(why) = &report.input_method {
+        log::info!(Paste, "[{tag}] input method: {why}");
+    }
+    let keys = report.keys.as_deref().unwrap_or("?");
+    log::info!(Paste, "[{tag}] {keys} posted, {} characters, target {target}", text.chars().count());
+    log::info!(
+        Paste,
+        "[{tag}] was on the clipboard before: {}",
+        report.before.as_deref().unwrap_or("?")
+    );
+    if let Some(waited) = report.waited_ms.filter(|waited| *waited > 0) {
+        log::info!(Paste, "[{tag}] waited {waited} ms for held keys to be released");
+    }
+    if let Some(reads) = &report.reads {
+        log::info!(Paste, "[{tag}] {reads}");
+    }
+    log::info!(Paste, "[{tag}] {}", report.restore.as_deref().unwrap_or("?"));
+    log::info!(
+        Paste,
+        "[{tag}] paste done in {} ms, {} ms with the call",
+        report.total_ms.unwrap_or(0),
+        started.elapsed().as_millis()
+    );
 }
 
 /// Says in plain words when the extension is not there to answer.

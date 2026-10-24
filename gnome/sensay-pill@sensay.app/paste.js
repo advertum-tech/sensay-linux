@@ -2,7 +2,15 @@
 //
 // GNOME on Wayland lets no application set the clipboard or press keys for
 // another window. The shell can do both, so the Sensay app hands the text to
-// this extension over the session bus, and the extension does what
+// this extension over the session bus.
+//
+// When the focused field takes text from the input method (GTK, Qt 6.7 and
+// later, Chromium and Electron on Wayland), the whole text goes in through it,
+// as the on-screen keyboard does it: nothing on the clipboard, no keys, any
+// layout. A terminal takes a line break from the input method as Enter, so
+// text with one goes the clipboard way there, where Ctrl+Shift+V pastes it.
+//
+// Anywhere else, X11 windows among them, the extension does what
 // ClipboardTextSink.swift does on macOS:
 //
 //     t0  the text goes on the clipboard
@@ -20,6 +28,8 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import Meta from 'gi://Meta';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const CLIPBOARD = Meta.SelectionType.SELECTION_CLIPBOARD;
 const TEXT = 'text/plain;charset=utf-8';
@@ -134,6 +144,17 @@ export class Paster {
     async _paste(text) {
         const started = GLib.get_monotonic_time();
         const report = {};
+
+        const focused = global.display.get_focus_window();
+        const terminal = isTerminal(focused?.get_wm_class());
+        if (Main.inputMethod.currentFocus && !(terminal && text.includes('\n'))) {
+            report.path = 'input-method';
+            report.target = focused?.get_wm_class() ?? focused?.get_title() ?? '(no window)';
+            Main.inputMethod.commit(text);
+            report.totalMs = Math.round((GLib.get_monotonic_time() - started) / 1000);
+            return report;
+        }
+        report.path = 'clipboard';
 
         const saved = await this._snapshot();
         report.before = saved

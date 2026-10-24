@@ -112,25 +112,14 @@ impl fmt::Display for Microphone {
 }
 
 /// evdev names of the single keys the activation key can be. Caps Lock is
-/// left out: it toggles case and nothing grabs it.
-pub const ACTIVATION_KEYS: [&str; 17] = [
+/// left out: it toggles case and nothing grabs it. F13-F24 are left out as
+/// in the Windows version: users' keyboards do not have them.
+pub const ACTIVATION_KEYS: [&str; 5] = [
     "KEY_RIGHTCTRL",
     "KEY_RIGHTALT",
     "KEY_RIGHTSHIFT",
     "KEY_SCROLLLOCK",
     "KEY_PAUSE",
-    "KEY_F13",
-    "KEY_F14",
-    "KEY_F15",
-    "KEY_F16",
-    "KEY_F17",
-    "KEY_F18",
-    "KEY_F19",
-    "KEY_F20",
-    "KEY_F21",
-    "KEY_F22",
-    "KEY_F23",
-    "KEY_F24",
 ];
 
 /// What starts and stops dictation: the Ctrl+Super chord (either Ctrl with
@@ -220,8 +209,7 @@ speech_service = {}
 api_key = {}
 
 # "ctrl+super" (hold either Ctrl with either Super), or one evdev key name:
-# KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT, KEY_SCROLLLOCK, KEY_PAUSE,
-# KEY_F13 ... KEY_F24.
+# KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT, KEY_SCROLLLOCK, KEY_PAUSE.
 activation_key = {}
 
 # "built-in", "auto" or "name:<PulseAudio source name>".
