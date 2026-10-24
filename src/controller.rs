@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::asr::recogniser::Recogniser;
 use crate::audio::{AudioRecorder, Recording};
 use crate::config::Microphone;
+use crate::error_presenter::ErrorPresenter;
 use crate::history::{History, Transcript, TranscriptState};
 use crate::log;
 use crate::paste::TextSink;
@@ -63,6 +64,7 @@ pub struct DictationController {
     /// and a paste started inside that time would take the first one's text
     /// for the user's own clipboard and put the wrong thing back.
     paste_turn: Arc<tokio::sync::Mutex<()>>,
+    errors: ErrorPresenter,
 }
 
 impl DictationController {
@@ -74,6 +76,7 @@ impl DictationController {
         history: Option<History>,
         recogniser: Recogniser,
         sink: TextSink,
+        errors: ErrorPresenter,
     ) -> Self {
         DictationController {
             recorder,
@@ -86,6 +89,7 @@ impl DictationController {
             recogniser,
             sink,
             paste_turn: Arc::new(tokio::sync::Mutex::new(())),
+            errors,
         }
     }
 
@@ -153,6 +157,7 @@ impl DictationController {
             }
             Err(error) => {
                 log::error!(App, "[{tag}] {error}");
+                self.errors.show(error.message());
                 self.update_pill();
             }
         }
@@ -178,6 +183,7 @@ impl DictationController {
             Ok(recording) => recording,
             Err(error) => {
                 log::error!(App, "[{tag}] {error}");
+                self.errors.show(error.message());
                 self.stop_waiting(&tag);
                 return;
             }
@@ -216,6 +222,7 @@ impl DictationController {
                 sink: self.sink.clone(),
                 paste_turn: self.paste_turn.clone(),
                 events: self.events.clone(),
+                errors: self.errors.clone(),
             },
         ));
     }
@@ -238,6 +245,7 @@ struct Services {
     sink: TextSink,
     paste_turn: Arc<tokio::sync::Mutex<()>>,
     events: UnboundedSender<ControllerEvent>,
+    errors: ErrorPresenter,
 }
 
 /// The rest of one dictation, after its audio is on disk: the history row,
@@ -249,6 +257,7 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
         sink,
         paste_turn,
         events,
+        errors,
     } = services;
     // Every way out of here ends the wait, the early ones included.
     let wait = WaitEnd {
@@ -319,6 +328,7 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
             let _turn = paste_turn.lock().await;
             if let Err(error) = sink.deliver(&row.text, &tag).await {
                 log::error!(Paste, "[{tag}] {error}");
+                errors.show(&error.message());
             }
         }
         TranscriptState::Empty => {
@@ -327,6 +337,7 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
         TranscriptState::Failed => {
             let reason = row.failure_reason.as_deref().unwrap_or("Recognition failed.");
             log::error!(App, "[{tag}] {reason}");
+            errors.show(reason);
         }
         TranscriptState::Recorded | TranscriptState::Sending | TranscriptState::Recognising => {}
     }

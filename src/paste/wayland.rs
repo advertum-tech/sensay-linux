@@ -67,6 +67,9 @@ use super::wake::{Wake, wait_readable};
 const BEFORE_PASTE: Duration = Duration::from_millis(12);
 const BETWEEN_KEYS: Duration = Duration::from_millis(8);
 const BEFORE_RESTORE: Duration = Duration::from_millis(500);
+/// A keyboard made a moment ago: the compositor has to find it before its
+/// keys count.
+const NEW_KEYBOARD: Duration = Duration::from_millis(500);
 const MODIFIER_POLL: Duration = Duration::from_millis(15);
 const MODIFIER_WAIT: Duration = Duration::from_millis(3000);
 const AFTER_MODIFIERS: Duration = Duration::from_millis(25);
@@ -586,6 +589,14 @@ impl Paster {
         if self.manager.is_none() {
             return Err("no input method field and no data-control for the clipboard".to_string());
         }
+        if self.keyboard.is_none() && self.uinput.is_none() {
+            // /dev/uinput may have opened up since launch (sensay setup).
+            if let Ok(device) = uinput_keyboard() {
+                crate::log::info!(Paste, "paste: uinput keyboard for the paste keys created now");
+                self.uinput = Some(device);
+                self.pause(NEW_KEYBOARD)?;
+            }
+        }
 
         let before = self.snapshot();
         report.before = Some(match &before {
@@ -607,7 +618,7 @@ impl Paster {
                 // Ctrl+V on top of held keys would be some other shortcut. The
                 // text stays on the clipboard for a paste by hand.
                 report.waited_ms = Some(ms(waited));
-                report.keys = Some("none, modifiers still held".to_string());
+                report.keys = Some(super::KEYS_HELD.to_string());
                 report.restore = Some("text left on the clipboard".to_string());
                 report.total_ms = Some(ms(started.elapsed()));
                 return Ok(report);
@@ -621,7 +632,7 @@ impl Paster {
         report.waited_ms = Some(ms(waited));
 
         if self.keyboard.is_none() && self.uinput.is_none() {
-            report.keys = Some("none, no virtual keyboard and no uinput".to_string());
+            report.keys = Some(super::NO_KEYBOARD.to_string());
             report.restore = Some("text left on the clipboard".to_string());
             report.total_ms = Some(ms(started.elapsed()));
             return Ok(report);

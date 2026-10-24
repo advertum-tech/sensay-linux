@@ -53,6 +53,17 @@ pub enum AudioError {
     CouldNotWrite(String),
 }
 
+impl AudioError {
+    /// What the user is told, in the words of ErrorPresenter.swift.
+    pub fn message(&self) -> &'static str {
+        match self {
+            AudioError::NoMicrophone => "No microphone found.",
+            AudioError::CouldNotStart(_) => "Could not start recording.",
+            AudioError::CouldNotWrite(_) => "Could not save the recording.",
+        }
+    }
+}
+
 impl fmt::Display for AudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -13,6 +13,7 @@ use ksni::menu::StandardItem;
 use ksni::{Handle, Icon, MenuItem, OfflineReason, TrayMethods};
 use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 
 use crate::Command;
 use crate::log;
@@ -28,7 +29,8 @@ const ICON_SIZES: [i32; 6] = [16, 22, 24, 32, 48, 64];
 
 pub struct SensayTray {
     commands: UnboundedSender<Command>,
-    last_error: String,
+    /// From the ErrorPresenter; None until the first error.
+    last_error: Option<String>,
 }
 
 impl SensayTray {
@@ -66,7 +68,7 @@ impl ksni::Tray for SensayTray {
             }
             .into(),
             StandardItem {
-                label: format!("Last error: {}", self.last_error),
+                label: format!("Last error: {}", self.last_error.as_deref().unwrap_or("none")),
                 enabled: false,
                 ..Default::default()
             }
@@ -113,16 +115,20 @@ impl ksni::Tray for SensayTray {
 
 /// Puts the icon up, retrying while there is no tray host. None when every
 /// attempt failed; the app then runs without an icon.
-pub async fn start(commands: UnboundedSender<Command>) -> Option<Handle<SensayTray>> {
+pub async fn start(
+    commands: UnboundedSender<Command>,
+    mut last_error: watch::Receiver<Option<String>>,
+) -> Option<Handle<SensayTray>> {
     let mut pause = FIRST_PAUSE;
     for attempt in 1..=MAX_ATTEMPTS {
         let tray = SensayTray {
             commands: commands.clone(),
-            last_error: "none".to_string(),
+            last_error: last_error.borrow_and_update().clone(),
         };
         match tray.spawn().await {
             Ok(handle) => {
                 log::info!(App, "tray: icon up (attempt {attempt})");
+                tokio::spawn(follow_last_error(handle.clone(), last_error));
                 return Some(handle);
             }
             Err(error) if attempt == MAX_ATTEMPTS => {
@@ -142,6 +148,16 @@ pub async fn start(commands: UnboundedSender<Command>) -> Option<Handle<SensayTr
         }
     }
     None
+}
+
+/// Puts each new error message into the menu, until the icon goes away.
+async fn follow_last_error(handle: Handle<SensayTray>, mut last_error: watch::Receiver<Option<String>>) {
+    while last_error.changed().await.is_ok() {
+        let message = last_error.borrow_and_update().clone();
+        if handle.update(|tray| tray.last_error = message).await.is_none() {
+            return;
+        }
+    }
 }
 
 /// The Sensay logo, `size` pixels square: the brand-orange rounded square

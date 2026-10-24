@@ -33,17 +33,49 @@ const SHELL_INTERFACE: &str = "com.advertumtech.Sensay.Shell";
 /// seconds of waiting for held keys; past this it counts as stuck.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Report::keys when no keys were pressed. KEYS_HELD is also in paste.js.
+const KEYS_HELD: &str = "none, modifiers still held";
+const NO_KEYBOARD: &str = "none, no virtual keyboard and no uinput";
+const NO_XTEST: &str = "none, the X server has no XTest";
+const NOT_TAKEN: &str = "none, the clipboard could not be taken";
+
 #[derive(Debug)]
 pub enum PasteError {
     /// No way to paste on this desktop yet.
     NoPath,
+    /// GNOME on Wayland, and the extension does not answer.
+    NoExtension,
+    /// The text is on the clipboard and no keys were pressed. `setup`: there
+    /// was no keyboard to press them with.
+    LeftOnClipboard { setup: bool },
     Failed(String),
+}
+
+impl PasteError {
+    /// What the user is told, in the words of ErrorPresenter.swift.
+    pub fn message(&self) -> String {
+        match self {
+            PasteError::NoPath => "Sensay cannot paste on this desktop. The text is in the history.".to_string(),
+            PasteError::NoExtension => "The text was not pasted: the GNOME extension is not running. \
+                                        Run sensay setup in a terminal, then log out and back in."
+                .to_string(),
+            PasteError::LeftOnClipboard { setup: false } => {
+                "The text is on the clipboard: press Ctrl+V to paste it.".to_string()
+            }
+            PasteError::LeftOnClipboard { setup: true } => "The text is on the clipboard: press Ctrl+V to paste it. \
+                                                             Run sensay setup in a terminal to have Sensay do it."
+                .to_string(),
+            PasteError::Failed(reason) => format!("The text was not pasted: {reason}. It is in the history."),
+        }
+    }
 }
 
 impl fmt::Display for PasteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PasteError::NoPath => f.write_str("no way to paste on this desktop yet, the text is in the history"),
+            PasteError::NoExtension => f.write_str("the GNOME extension sensay-pill@sensay.app is not loaded"),
+            PasteError::LeftOnClipboard { .. } => f.write_str("no keys pressed, the text is left on the clipboard"),
             PasteError::Failed(reason) => write!(f, "paste failed: {reason}"),
         }
     }
@@ -130,7 +162,12 @@ impl TextSink {
             Path::Wayland(paste) => finish(paste.paste(text)).await?,
         };
         log_report(tag, text, &report, started);
-        Ok(())
+        match report.keys.as_deref() {
+            Some(NOT_TAKEN) => Err(PasteError::Failed("the clipboard could not be taken".to_string())),
+            Some(NO_KEYBOARD) => Err(PasteError::LeftOnClipboard { setup: true }),
+            Some(KEYS_HELD | NO_XTEST) => Err(PasteError::LeftOnClipboard { setup: false }),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -157,7 +194,7 @@ async fn ask_extension(connection: &Connection, text: &str) -> Result<Report, Pa
                 CALL_TIMEOUT.as_secs()
             )));
         }
-        Ok(Err(error)) => return Err(PasteError::Failed(describe(&error))),
+        Ok(Err(error)) => return Err(extension_error(&error)),
         Ok(Ok(reply)) => reply,
     };
     let report: String = reply
@@ -204,14 +241,14 @@ fn log_report(tag: &str, text: &str, report: &Report, started: Instant) {
     );
 }
 
-/// Says in plain words when the extension is not there to answer.
-fn describe(error: &zbus::Error) -> String {
+/// NoExtension when the extension is not there to answer.
+fn extension_error(error: &zbus::Error) -> PasteError {
     if let zbus::Error::MethodError(name, message, _) = error {
         let name = name.as_str();
         if name.ends_with("UnknownObject") || name.ends_with("UnknownMethod") || name.ends_with("UnknownInterface") {
-            return "the GNOME extension sensay-pill@sensay.app is not loaded".to_string();
+            return PasteError::NoExtension;
         }
-        return format!("{name}: {}", message.as_deref().unwrap_or(""));
+        return PasteError::Failed(format!("{name}: {}", message.as_deref().unwrap_or("")));
     }
-    error.to_string()
+    PasteError::Failed(error.to_string())
 }

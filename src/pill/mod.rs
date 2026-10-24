@@ -27,6 +27,7 @@ use zbus::Connection;
 use zbus::object_server::SignalEmitter;
 
 use crate::desktop::is_gnome_wayland;
+use crate::error_presenter::ErrorPresenter;
 use crate::log;
 use meter::LevelScale;
 
@@ -128,14 +129,15 @@ impl Pill {
 
     /// Starts the pill for this desktop. Always returns: without a way to
     /// draw it the reason goes to the log and dictation works without it.
-    pub async fn start(connection: Option<&Connection>, level: watch::Receiver<f32>) -> Pill {
+    /// On GNOME the user is told when the extension is not running.
+    pub async fn start(connection: Option<&Connection>, level: watch::Receiver<f32>, errors: &ErrorPresenter) -> Pill {
         let output = match backend() {
             Backend::GnomeExtension => {
                 let Some(connection) = connection else {
                     log::warning!(Pill, "pill: no session bus, no pill");
                     return Pill { states: None };
                 };
-                match gnome::serve(connection).await {
+                match gnome::serve(connection, errors).await {
                     Ok((emitter, current)) => Output::Gnome { emitter, current },
                     Err(error) => {
                         log::error!(Pill, "pill: could not serve the pill on the session bus: {error}");

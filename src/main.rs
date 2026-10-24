@@ -22,12 +22,14 @@ mod bus;
 mod config;
 mod controller;
 mod desktop;
+mod error_presenter;
 mod hotkey;
 mod history;
 mod log;
 mod paste;
 mod paths;
 mod pill;
+mod setup;
 mod tray;
 mod ui;
 mod x11_scale;
@@ -44,7 +46,9 @@ use zbus::Connection;
 use crate::audio::AudioRecorder;
 use crate::asr::ServiceSettings;
 use crate::asr::recogniser::Recogniser;
+use crate::config::ActivationKey;
 use crate::controller::DictationController;
+use crate::error_presenter::ErrorPresenter;
 use crate::history::History;
 use crate::paste::TextSink;
 use crate::pill::Pill;
@@ -82,8 +86,7 @@ fn main() -> ExitCode {
     };
 
     if let Mode::Setup = mode {
-        println!("not implemented yet");
-        return ExitCode::SUCCESS;
+        return setup::run();
     }
 
     log::init();
@@ -170,13 +173,15 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
         TextSink::backend_names().1
     );
 
+    let errors = ErrorPresenter::start(connection.clone());
+
     let (hotkey_tx, mut hotkey_events) = mpsc::unbounded_channel();
-    let mut hotkey = Some(Hotkey::start(config.activation_key, hotkey_tx.clone()));
+    let mut hotkey = Some(start_hotkey(config.activation_key, &hotkey_tx, &errors));
 
     let recorder = AudioRecorder::open().await;
-    let pill = Pill::start(connection.as_ref(), recorder.level()).await;
+    let pill = Pill::start(connection.as_ref(), recorder.level(), &errors).await;
 
-    let tray = tokio::spawn(tray::start(commands_tx.clone()));
+    let tray = tokio::spawn(tray::start(commands_tx.clone(), errors.last_error()));
 
     let history = match History::open().await {
         Ok(history) => {
@@ -230,6 +235,7 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
         history,
         recogniser,
         sink,
+        errors.clone(),
     );
 
     // `sensay settings` or `sensay history` with no app running: this process
@@ -285,7 +291,7 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
                                 log::error!(Hotkey, "stopping the hotkey thread failed");
                             }
                         }
-                        hotkey = Some(Hotkey::start(wanted.activation_key, hotkey_tx.clone()));
+                        hotkey = Some(start_hotkey(wanted.activation_key, &hotkey_tx, &errors));
                     }
                     if wanted.microphone != applied.microphone {
                         log::info!(App, "settings: microphone={}", wanted.microphone);
@@ -335,6 +341,16 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Starts the key listener; the user is told when the keyboards cannot be
+/// read.
+fn start_hotkey(key: ActivationKey, events: &mpsc::UnboundedSender<HotkeyEvent>, errors: &ErrorPresenter) -> Hotkey {
+    let hotkey = Hotkey::start(key, events.clone());
+    if hotkey.lacks_access() {
+        errors.show(hotkey::NO_ACCESS);
+    }
+    hotkey
 }
 
 /// Another process owns the name: pass the command on and exit.

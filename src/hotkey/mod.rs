@@ -17,6 +17,9 @@ pub enum HotkeyEvent {
     Up,
 }
 
+/// What the user is told when the keyboards cannot be read.
+pub const NO_ACCESS: &str = "Keyboard access is off. Run sensay setup in a terminal to turn it on.";
+
 pub struct Hotkey {
     listener: evdev::EvdevListener,
 }
@@ -34,6 +37,12 @@ impl Hotkey {
         Hotkey {
             listener: evdev::EvdevListener::start(key, events),
         }
+    }
+
+    /// No keyboard could be opened for want of permission: sensay setup was
+    /// not run, or the session is not the active one at the seat.
+    pub fn lacks_access(&self) -> bool {
+        self.listener.lacks_access()
     }
 
     /// Stops the listener and waits for its thread to end.

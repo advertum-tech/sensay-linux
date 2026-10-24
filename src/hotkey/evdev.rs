@@ -44,15 +44,12 @@ const PRESSED: i32 = 1;
 pub struct EvdevListener {
     stop: Option<PipeWriter>,
     thread: Option<JoinHandle<()>>,
+    /// The first scan opened no keyboard and was refused permission.
+    lacks_access: bool,
 }
 
 impl EvdevListener {
     pub fn start(key: ActivationKey, events: UnboundedSender<HotkeyEvent>) -> EvdevListener {
-        let idle = EvdevListener {
-            stop: None,
-            thread: None,
-        };
-
         let key = match key {
             ActivationKey::CtrlSuper => KeySpec::CtrlSuper,
             ActivationKey::Single(name) => KeySpec::Single(KeyCode::from_str(name).unwrap_or_else(|_| {
@@ -65,6 +62,12 @@ impl EvdevListener {
         // are in the log right after the startup lines.
         let scan = scan();
         report_scan(&scan, key);
+        let lacks_access = access_denied(&scan);
+        let idle = EvdevListener {
+            stop: None,
+            thread: None,
+            lacks_access,
+        };
 
         let inotify = watch_input_dir();
 
@@ -92,12 +95,17 @@ impl EvdevListener {
             Ok(thread) => EvdevListener {
                 stop: Some(stop_writer),
                 thread: Some(thread),
+                lacks_access,
             },
             Err(error) => {
                 log::error!(Hotkey, "could not start the hotkey thread ({error}), activation key is off");
                 idle
             }
         }
+    }
+
+    pub fn lacks_access(&self) -> bool {
+        self.lacks_access
     }
 
     pub fn stop(mut self) {
@@ -236,7 +244,7 @@ fn report_scan(scan: &Scan, key: KeySpec) {
     if !denied.is_empty() {
         log::warning!(
             Hotkey,
-            "no permission to read {} of {} input nodes ({}); reading the keyboard needs group input or a udev rule",
+            "no permission to read {} of {} input nodes ({}); sensay setup gives access",
             denied.len(),
             scan.failed.len() + scan.keyboards.len() + scan.not_keyboards.len(),
             names(&denied)
@@ -257,6 +265,14 @@ fn report_scan(scan: &Scan, key: KeySpec) {
             scan.keyboards.len()
         );
     }
+}
+
+/// No keyboard opened, and nodes or the folder refused for want of
+/// permission.
+fn access_denied(scan: &Scan) -> bool {
+    let denied = |error: &io::Error| error.kind() == io::ErrorKind::PermissionDenied;
+    scan.dir_error.as_ref().is_some_and(denied)
+        || (scan.keyboards.is_empty() && scan.failed.iter().any(|(_, error)| denied(error)))
 }
 
 fn names(paths: &[&PathBuf]) -> String {

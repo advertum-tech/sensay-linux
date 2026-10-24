@@ -13,6 +13,12 @@ pub fn is_gnome_wayland() -> bool {
     wayland && gnome
 }
 
+/// XDG_CURRENT_DESKTOP names GNOME, Wayland or not.
+pub fn is_gnome() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|desktops| desktops.split(':').any(|desktop| desktop.eq_ignore_ascii_case("GNOME")))
+}
+
 /// A Wayland session: a Wayland display is announced.
 pub fn is_wayland() -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());

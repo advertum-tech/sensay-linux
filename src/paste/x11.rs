@@ -351,7 +351,7 @@ impl Paster {
         self.held = Held::Text(dictated.into_bytes());
         let time = self.server_time()?;
         if !self.own(time)? {
-            report.keys = Some("none, the clipboard could not be taken".to_string());
+            report.keys = Some(super::NOT_TAKEN.to_string());
             report.restore = Some("nothing changed".to_string());
             report.total_ms = Some(ms(started.elapsed()));
             return Ok(report);
@@ -364,7 +364,7 @@ impl Paster {
                 // Ctrl+V on top of held keys would be some other shortcut. The
                 // text stays on the clipboard for a paste by hand.
                 report.waited_ms = Some(ms(waited));
-                report.keys = Some("none, modifiers still held".to_string());
+                report.keys = Some(super::KEYS_HELD.to_string());
                 report.restore = Some("text left on the clipboard".to_string());
                 report.total_ms = Some(ms(started.elapsed()));
                 return Ok(report);
@@ -386,7 +386,7 @@ impl Paster {
                 .unwrap_or_else(|| "(no window)".to_string()),
         );
         if !self.xtest {
-            report.keys = Some("none, the X server has no XTest".to_string());
+            report.keys = Some(super::NO_XTEST.to_string());
             report.restore = Some("text left on the clipboard".to_string());
             report.total_ms = Some(ms(started.elapsed()));
             return Ok(report);
