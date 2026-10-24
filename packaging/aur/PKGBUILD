@@ -1,0 +1,21 @@
+# Maintainer: Sensay <hi@sensay.app>
+pkgname=sensay-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Dictation: hold a key, speak, and the text is pasted where the cursor is'
+arch=('x86_64' 'aarch64')
+url='https://sensay.app'
+license=('LicenseRef-Proprietary')
+depends=('gcc-libs' 'glibc' 'libpulse' 'libxkbcommon' 'libxkbcommon-x11')
+provides=('sensay')
+conflicts=('sensay')
+install=sensay.install
+options=('!strip' '!debug')
+source_x86_64=("sensay-$pkgver-x86_64.tar.gz::https://github.com/advertum-tech/sensay-linux/releases/download/v$pkgver/sensay-$pkgver-x86_64.tar.gz")
+source_aarch64=("sensay-$pkgver-aarch64.tar.gz::https://github.com/advertum-tech/sensay-linux/releases/download/v$pkgver/sensay-$pkgver-aarch64.tar.gz")
+sha256sums_x86_64=('@SHA_X86_64@')
+sha256sums_aarch64=('@SHA_AARCH64@')
+
+package() {
+    cp -a "$srcdir/sensay-$pkgver/usr" "$pkgdir/"
+}

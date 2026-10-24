@@ -1,6 +1,7 @@
 // Start at login: an XDG autostart entry, the counterpart of
 // LaunchAtLogin.swift. GNOME, KDE and the other XDG desktops start what is in
-// ~/.config/autostart at login; Sway and Hyprland do not (step 8).
+// ~/.config/autostart at login; Sway and Hyprland do not, and sensay setup
+// shows the line for their config.
 
 use std::fs;
 use std::io;
@@ -36,7 +37,7 @@ pub fn set(enabled: bool) -> io::Result<()> {
 }
 
 /// The AppImage when running from one, else this executable.
-fn program() -> String {
+pub fn program() -> String {
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
         return appimage.to_string_lossy().into_owned();
     }
@@ -60,7 +61,7 @@ fn entry(program: &str) -> String {
 }
 
 /// Quoting of an Exec argument by the Desktop Entry specification.
-fn quote(argument: &str) -> String {
+pub fn quote(argument: &str) -> String {
     let mut quoted = String::from("\"");
     for character in argument.chars() {
         if matches!(character, '"' | '`' | '$' | '\\') {

@@ -1,0 +1,12 @@
+Package: sensay
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Sensay <hi@sensay.app>
+Installed-Size: @SIZE@
+Depends: libc6 (>= 2.35), libgcc-s1, libpulse0, libxkbcommon0, libxkbcommon-x11-0
+Section: utils
+Priority: optional
+Homepage: https://sensay.app
+Description: dictation: hold a key, speak, and the text is pasted
+ Sensay records while the activation key is held, sends the recording to
+ the speech service and pastes the text where the cursor is.

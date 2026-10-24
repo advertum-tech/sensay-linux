@@ -3,14 +3,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// `$XDG_DATA_HOME/sensay`, or `~/.local/share/sensay` when the variable is
-/// unset, empty or relative. None without HOME.
+/// `$XDG_DATA_HOME`, or `~/.local/share` when the variable is unset, empty
+/// or relative. None without HOME.
+pub fn data_home() -> Option<PathBuf> {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(dir) if Path::new(&dir).is_absolute() => Some(PathBuf::from(dir)),
+        _ => Some(PathBuf::from(std::env::var_os("HOME")?).join(".local").join("share")),
+    }
+}
+
+/// `$XDG_DATA_HOME/sensay`. None without HOME.
 pub fn data_folder() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_DATA_HOME") {
-        Some(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".local").join("share"),
-    };
-    Some(base.join("sensay"))
+    data_home().map(|base| base.join("sensay"))
 }
 
 /// The recordings, one WAV file per dictation.

@@ -241,12 +241,20 @@ fn report_scan(scan: &Scan, key: KeySpec) {
         .filter(|(_, error)| error.kind() == io::ErrorKind::PermissionDenied)
         .map(|(path, _)| path)
         .collect();
-    if !denied.is_empty() {
+    let nodes = scan.failed.len() + scan.keyboards.len() + scan.not_keyboards.len();
+    if !denied.is_empty() && scan.keyboards.is_empty() {
         log::warning!(
             Hotkey,
-            "no permission to read {} of {} input nodes ({}); sensay setup gives access",
+            "no permission to read {} of {nodes} input nodes ({}); sensay setup gives access",
             denied.len(),
-            scan.failed.len() + scan.keyboards.len() + scan.not_keyboards.len(),
+            names(&denied)
+        );
+    } else if !denied.is_empty() {
+        // The udev rule opens the keyboards only: the rest are mice and the like.
+        log::debug!(
+            Hotkey,
+            "no permission to read {} of {nodes} input nodes ({})",
+            denied.len(),
             names(&denied)
         );
     }

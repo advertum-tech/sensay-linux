@@ -1,0 +1,10 @@
+#!/bin/sh
+# The udev rule reaches the devices present now: the user at the seat can
+# read the keyboards and use /dev/uinput without logging out.
+set -e
+if [ "$1" = configure ]; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    modprobe uinput >/dev/null 2>&1 || true
+    udevadm trigger --action=change --subsystem-match=input --subsystem-match=misc >/dev/null 2>&1 || true
+fi
+exit 0

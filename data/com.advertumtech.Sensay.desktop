@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=Sensay
+GenericName=Dictation
+Comment=Hold a key, speak, let go: the text is pasted where the cursor is
+Exec=sensay
+Icon=com.advertumtech.Sensay
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech;voice;transcription;
+StartupNotify=false
+X-GNOME-UsesNotifications=true
+Actions=History;Settings;
+
+[Desktop Action History]
+Name=History
+Exec=sensay history
+
+[Desktop Action Settings]
+Name=Settings
+Exec=sensay settings

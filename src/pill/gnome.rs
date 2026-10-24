@@ -20,16 +20,15 @@ use zbus::zvariant::OwnedValue;
 
 use super::PillState;
 use crate::error_presenter::ErrorPresenter;
+use crate::gnome_extension;
 use crate::log;
 
 const PATH: &str = "/com/advertumtech/Sensay/Pill";
-const EXTENSION_UUID: &str = "sensay-pill@sensay.app";
+const EXTENSION_UUID: &str = gnome_extension::UUID;
 
 // What the user is told when the extension does not run: without it there
 // is no pill and no paste.
-const NOT_INSTALLED: &str =
-    "The GNOME extension is not installed. Run sensay setup in a terminal, then log out and back in.";
-const SWITCHED_OFF: &str = "The GNOME extension is switched off. Run sensay setup in a terminal to switch it on.";
+const SWITCHED_OFF: &str = "GNOME extensions are switched off. Turn them on in the Extensions app.";
 const OUT_OF_DATE: &str = "The GNOME extension does not support this version of GNOME.";
 const AFTER_LOGIN: &str = "The GNOME extension starts after you log out and back in.";
 
@@ -61,7 +60,7 @@ pub async fn serve(
         .object_server()
         .at(PATH, PillInterface { current })
         .await?;
-    if let Some(message) = report_extension(connection).await {
+    if let Some(message) = check_extension(connection).await {
         errors.show(&message);
     }
     let emitter = SignalEmitter::new(connection, PATH)?.into_owned();
@@ -76,32 +75,39 @@ pub async fn emit_level(emitter: &SignalEmitter<'_>, level: f64) -> zbus::Result
     PillInterface::level(emitter, level).await
 }
 
-/// One line on whether GNOME Shell has the extension and what state it is
-/// in, as GNOME's ExtensionState numbers it; the message for the user when
-/// it is not running.
-async fn report_extension(connection: &Connection) -> Option<String> {
-    let reply = connection
-        .call_method(
-            Some("org.gnome.Shell.Extensions"),
-            "/org/gnome/Shell/Extensions",
-            Some("org.gnome.Shell.Extensions"),
-            "GetExtensionInfo",
-            &(EXTENSION_UUID,),
-        )
-        .await;
-    let info: HashMap<String, OwnedValue> = match reply.and_then(|reply| Ok(reply.body().deserialize()?)) {
-        Ok(info) => info,
+/// Puts the extension in and switches it on (src/gnome_extension.rs), then
+/// writes one line on the state GNOME Shell reports, as its ExtensionState
+/// numbers it. Returns the message for the user when the extension is not
+/// running.
+async fn check_extension(connection: &Connection) -> Option<String> {
+    // Asked before ensure(): right after it the shell may be busy switching
+    // the extension on.
+    let info = extension_info(connection).await;
+    let ensured = match tokio::task::spawn_blocking(gnome_extension::ensure).await {
+        Ok(Ok(ensured)) => ensured,
+        Ok(Err(error)) => {
+            log::warning!(Pill, "pill: could not put GNOME extension {EXTENSION_UUID} in: {error}");
+            return Some(format!("The GNOME extension could not be installed: {error}."));
+        }
         Err(error) => {
-            log::warning!(Pill, "pill: cannot ask GNOME Shell about {EXTENSION_UUID}: {error}");
+            log::warning!(Pill, "pill: could not put GNOME extension {EXTENSION_UUID} in: {error}");
             return None;
         }
     };
+    if ensured.files_changed {
+        log::info!(Pill, "pill: GNOME extension {EXTENSION_UUID} written, loads at the next login");
+        return Some(AFTER_LOGIN.to_string());
+    }
+    if ensured.switched_on {
+        log::info!(Pill, "pill: GNOME extension {EXTENSION_UUID} switched on");
+    }
+    let info = info?;
     let Some(state) = info.get("state").and_then(|value| f64::try_from(value).ok()) else {
         log::warning!(
             Pill,
-            "pill: GNOME extension {EXTENSION_UUID} is not installed, the pill stays hidden"
+            "pill: GNOME Shell does not know extension {EXTENSION_UUID} yet, it loads at the next login"
         );
-        return Some(NOT_INSTALLED.to_string());
+        return Some(AFTER_LOGIN.to_string());
     };
     let name = match state as i64 {
         1 => "active",
@@ -123,6 +129,8 @@ async fn report_extension(connection: &Connection) -> Option<String> {
         None => log::warning!(Pill, "pill: GNOME extension {EXTENSION_UUID}: {name}"),
     }
     match state as i64 {
+        // Switched on a moment ago; the shell turns it on now.
+        2 if ensured.switched_on => None,
         2 => Some(SWITCHED_OFF.to_string()),
         3 => Some(format!(
             "The GNOME extension failed to start: {}",
@@ -131,5 +139,25 @@ async fn report_extension(connection: &Connection) -> Option<String> {
         4 => Some(OUT_OF_DATE.to_string()),
         6 => Some(AFTER_LOGIN.to_string()),
         _ => None,
+    }
+}
+
+/// What GNOME Shell says about the extension; None when it cannot be asked.
+async fn extension_info(connection: &Connection) -> Option<HashMap<String, OwnedValue>> {
+    let reply = connection
+        .call_method(
+            Some("org.gnome.Shell.Extensions"),
+            "/org/gnome/Shell/Extensions",
+            Some("org.gnome.Shell.Extensions"),
+            "GetExtensionInfo",
+            &(EXTENSION_UUID,),
+        )
+        .await;
+    match reply.and_then(|reply| Ok(reply.body().deserialize()?)) {
+        Ok(info) => Some(info),
+        Err(error) => {
+            log::warning!(Pill, "pill: cannot ask GNOME Shell about {EXTENSION_UUID}: {error}");
+            None
+        }
     }
 }

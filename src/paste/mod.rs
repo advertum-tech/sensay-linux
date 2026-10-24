@@ -56,8 +56,8 @@ impl PasteError {
     pub fn message(&self) -> String {
         match self {
             PasteError::NoPath => "Sensay cannot paste on this desktop. The text is in the history.".to_string(),
-            PasteError::NoExtension => "The text was not pasted: the GNOME extension is not running. \
-                                        Run sensay setup in a terminal, then log out and back in."
+            PasteError::NoExtension => "The text was not pasted: the GNOME extension is not running yet. \
+                                        It starts after you log out and back in."
                 .to_string(),
             PasteError::LeftOnClipboard { setup: false } => {
                 "The text is on the clipboard: press Ctrl+V to paste it.".to_string()

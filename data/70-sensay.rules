@@ -1,0 +1,4 @@
+# Sensay: the activation key is read from the keyboards and the paste keys
+# go through uinput, for the user at the seat (systemd-logind, uaccess).
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

@@ -1,17 +1,21 @@
 // sensay setup: the one-time system setup for a copy that did not come from a
 // package (the AppImage, a build from source). A package does the same in
-// its install script. Running it again is safe: each part is skipped when it
-// is in place.
+// its install script, and the app puts the GNOME extension in at launch.
+// Running it again is safe: each part is skipped when it is in place.
 //
 //   1. A udev rule that gives the user at the seat the keyboards, where the
 //      activation key is read, and /dev/uinput, where the paste keys go on
 //      KDE. systemd-logind applies it (TAG+="uaccess") at once: no group to
 //      join, no logging out, and a Sensay already running picks the
-//      keyboards up. Written to /etc/udev/rules.d after one password prompt
-//      (pkexec, else sudo in the terminal).
-//   2. On GNOME: the Shell extension that draws the pill and pastes, copied
-//      into ~/.local/share/gnome-shell/extensions and switched on. GNOME
+//      keyboards up. Written to /etc/udev/rules.d after one password prompt:
+//      sudo in the terminal, else pkexec.
+//   2. On GNOME: the Shell extension that draws the pill and pastes, put in
+//      and switched on as the app does at launch (gnome_extension.rs). GNOME
 //      loads a new extension at the next login.
+//   3. From an AppImage: the menu entry and the icon in ~/.local/share, the
+//      entry starting the AppImage where it lies now.
+//   4. On Sway and Hyprland, which do not run autostart entries: the line
+//      that starts Sensay at login, for the user to put in their config.
 //
 // It runs as the user, not as root: the extension belongs in the user's home.
 
@@ -19,28 +23,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use crate::desktop;
+use crate::{autostart, desktop, gnome_extension, paths};
 
 /// The rule, the same file the packages install into /usr/lib/udev/rules.d.
 /// The name sorts it before 73-seat-late.rules, where uaccess is applied.
-pub const UDEV_RULE: &str = "\
-# Sensay: the activation key is read from the keyboards and the paste keys
-# go through uinput, for the user at the seat (systemd-logind, uaccess).
-SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"
-KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"
-";
+pub const UDEV_RULE: &str = include_str!("../data/70-sensay.rules");
 
 const RULE_NAME: &str = "70-sensay.rules";
 const RULE_DIRS: [&str; 2] = ["/etc/udev/rules.d", "/usr/lib/udev/rules.d"];
 
-const EXTENSION_UUID: &str = "sensay-pill@sensay.app";
-const EXTENSION_FILES: [(&str, &str); 3] = [
-    ("metadata.json", include_str!("../gnome/sensay-pill@sensay.app/metadata.json")),
-    ("extension.js", include_str!("../gnome/sensay-pill@sensay.app/extension.js")),
-    ("paste.js", include_str!("../gnome/sensay-pill@sensay.app/paste.js")),
-];
-/// Where a package puts the extension for every user.
-const SYSTEM_EXTENSIONS: &str = "/usr/share/gnome-shell/extensions";
+const DESKTOP_ENTRY: &str = include_str!("../data/com.advertumtech.Sensay.desktop");
+const DESKTOP_ENTRY_NAME: &str = "com.advertumtech.Sensay.desktop";
+const ICON: &str = include_str!("../data/icons/hicolor/scalable/apps/com.advertumtech.Sensay.svg");
+const ICON_PATH: &str = "icons/hicolor/scalable/apps/com.advertumtech.Sensay.svg";
 
 pub fn run() -> ExitCode {
     // SAFETY: geteuid has no preconditions.
@@ -65,16 +60,32 @@ pub fn run() -> ExitCode {
     }
 
     if desktop::is_gnome() {
-        match install_extension() {
-            Ok(Extension::InPlace) => println!("GNOME extension: in place and switched on."),
-            Ok(Extension::Installed) => {
+        match gnome_extension::ensure() {
+            Ok(ensured) if ensured.files_changed => {
                 println!("GNOME extension: installed and switched on; log out and back in to load it.")
             }
+            Ok(ensured) if ensured.switched_on => println!("GNOME extension: switched on."),
+            Ok(_) => println!("GNOME extension: in place and switched on."),
             Err(reason) => {
                 println!("GNOME extension: failed: {reason}");
                 failed = true;
             }
         }
+    }
+
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        match install_menu_entry(&appimage.to_string_lossy()) {
+            Ok(path) => println!("Menu entry: {}.", path.display()),
+            Err(reason) => {
+                println!("Menu entry: failed: {reason}");
+                failed = true;
+            }
+        }
+    }
+
+    if let Some((desktop, file, line)) = autostart_line() {
+        println!("Start at login: {desktop} does not run autostart entries; add this line to {file}:");
+        println!("    {line}");
     }
 
     if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
@@ -89,7 +100,10 @@ fn installed_rule() -> Option<PathBuf> {
 }
 
 /// Writes the rule into /etc/udev/rules.d and applies it to the devices
-/// present now, as root through pkexec, or sudo where pkexec is missing.
+/// present now, as root: through sudo when run in a terminal, else through
+/// pkexec. pkexec asks from a terminal through polkit's own helper, which
+/// fails where polkit finds no session for it ("No session for cookie",
+/// Ubuntu 26.04, 24 October 2026); sudo asks in the terminal itself.
 fn install_rule() -> Result<(), String> {
     let staged = std::env::temp_dir().join(format!("sensay-{}-{RULE_NAME}", std::process::id()));
     std::fs::write(&staged, UDEV_RULE).map_err(|error| format!("cannot write {}: {error}", staged.display()))?;
@@ -104,9 +118,12 @@ fn install_rule() -> Result<(), String> {
          && udevadm settle"
     );
     let staged_arg = staged.to_string_lossy().into_owned();
+    // SAFETY: isatty has no preconditions.
+    let terminal = unsafe { libc::isatty(0) } == 1;
+    let order = if terminal { ["sudo", "pkexec"] } else { ["pkexec", "sudo"] };
     let mut tried = Vec::new();
     let mut done = false;
-    for elevate in ["pkexec", "sudo"] {
+    for elevate in order {
         let status = Command::new(elevate)
             .args(["/bin/sh", "-c", &script, "sh", &staged_arg])
             .status();
@@ -135,85 +152,63 @@ fn install_rule() -> Result<(), String> {
     }
 }
 
-enum Extension {
-    InPlace,
-    Installed,
-}
-
-/// Copies the extension into the user's extensions unless a package put it
-/// in for every user, and adds it to the extensions GNOME switches on.
-fn install_extension() -> Result<Extension, String> {
-    let mut changed = false;
-    let system_copy = Path::new(SYSTEM_EXTENSIONS).join(EXTENSION_UUID).join("metadata.json");
-    if !system_copy.exists() {
-        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-        let folder = PathBuf::from(home).join(".local/share/gnome-shell/extensions").join(EXTENSION_UUID);
-        std::fs::create_dir_all(&folder).map_err(|error| format!("cannot create {}: {error}", folder.display()))?;
-        for (name, content) in EXTENSION_FILES {
-            let path = folder.join(name);
-            if std::fs::read_to_string(&path).is_ok_and(|text| text == content) {
-                continue;
-            }
-            std::fs::write(&path, content).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-            changed = true;
+/// Writes the menu entry for the AppImage and the icon into the user's data
+/// folder; returns where the entry went.
+fn install_menu_entry(appimage: &str) -> Result<PathBuf, String> {
+    let data = paths::data_home().ok_or("HOME is not set")?;
+    let entry = data.join("applications").join(DESKTOP_ENTRY_NAME);
+    let icon = data.join(ICON_PATH);
+    for (path, content) in [(&entry, menu_entry(appimage)), (&icon, ICON.to_string())] {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         }
+        std::fs::write(path, content).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     }
-    if switch_on()? {
-        changed = true;
-    }
-    Ok(if changed { Extension::Installed } else { Extension::InPlace })
+    Ok(entry)
 }
 
-/// Adds the extension to org.gnome.shell enabled-extensions; true when it
-/// was not there.
-fn switch_on() -> Result<bool, String> {
-    let output = Command::new("gsettings")
-        .args(["get", "org.gnome.shell", "enabled-extensions"])
-        .output()
-        .map_err(|error| format!("gsettings: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("gsettings get ended with {}", output.status));
-    }
-    let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let Some(updated) = with_extension(&current, EXTENSION_UUID) else {
-        return Ok(false);
-    };
-    let status = Command::new("gsettings")
-        .args(["set", "org.gnome.shell", "enabled-extensions", &updated])
-        .status()
-        .map_err(|error| format!("gsettings: {error}"))?;
-    if !status.success() {
-        return Err(format!("gsettings set ended with {status}"));
-    }
-    Ok(true)
+/// The packages' entry with each Exec starting `program`.
+fn menu_entry(program: &str) -> String {
+    let program = autostart::quote(program);
+    DESKTOP_ENTRY
+        .lines()
+        .map(|line| match line.strip_prefix("Exec=sensay") {
+            Some(arguments) => format!("Exec={program}{arguments}\n"),
+            None => format!("{line}\n"),
+        })
+        .collect()
 }
 
-/// The list gsettings printed with `uuid` added; None when it is there.
-/// gsettings prints `@as []` for an empty list and `['a', 'b']` otherwise.
-fn with_extension(list: &str, uuid: &str) -> Option<String> {
-    let quoted = format!("'{uuid}'");
-    if list.contains(&quoted) {
-        return None;
-    }
-    let inner = list.trim_start_matches("@as").trim().trim_start_matches('[').trim_end_matches(']').trim();
-    Some(if inner.is_empty() {
-        format!("[{quoted}]")
+/// For Sway and Hyprland: the desktop, its config file and the line that
+/// starts Sensay at login.
+fn autostart_line() -> Option<(&'static str, &'static str, String)> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let program = autostart::quote(&autostart::program());
+    if set("HYPRLAND_INSTANCE_SIGNATURE") {
+        Some(("Hyprland", "~/.config/hypr/hyprland.conf", format!("exec-once = {program}")))
+    } else if set("SWAYSOCK") {
+        Some(("Sway", "~/.config/sway/config", format!("exec {program}")))
     } else {
-        format!("[{inner}, {quoted}]")
-    })
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::with_extension;
+    use super::menu_entry;
 
     #[test]
-    fn adds_the_extension_to_the_list_once() {
-        assert_eq!(with_extension("@as []", "a@b").as_deref(), Some("['a@b']"));
+    fn menu_entry_starts_the_appimage() {
+        let entry = menu_entry("/home/u/Apps/Sensay.AppImage");
+        let execs: Vec<&str> = entry.lines().filter(|line| line.starts_with("Exec=")).collect();
         assert_eq!(
-            with_extension("['ubuntu-dock@ubuntu.com']", "a@b").as_deref(),
-            Some("['ubuntu-dock@ubuntu.com', 'a@b']")
+            execs,
+            [
+                "Exec=\"/home/u/Apps/Sensay.AppImage\"",
+                "Exec=\"/home/u/Apps/Sensay.AppImage\" history",
+                "Exec=\"/home/u/Apps/Sensay.AppImage\" settings",
+            ]
         );
-        assert_eq!(with_extension("['a@b', 'x@y']", "a@b"), None);
+        assert!(entry.contains("Icon=com.advertumtech.Sensay\n"));
     }
 }

@@ -1,4 +1,5 @@
-// Logging. Every line goes to journald and to stderr.
+// Logging. Every line goes to journald and to stderr, but for stderr that is
+// the journal already: then once.
 //
 // Read with:
 //   journalctl --user -t sensay --since -10m -o cat
@@ -97,7 +98,8 @@ pub fn init() {
         Err(error) => (None, Some(error)),
     };
 
-    let stderr = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let stderr = (journald.is_none() || !stderr_is_journal())
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
 
     tracing_subscriber::registry()
         .with(journald)
@@ -115,4 +117,22 @@ pub fn init() {
         error!(App, "panic: {info}");
         default_hook(info);
     }));
+}
+
+/// Whether stderr is the journal, as for an app the desktop started: systemd
+/// then sets JOURNAL_STREAM to that stream's device and inode
+/// (systemd.exec(5)). A terminal started that way passes the variable on to
+/// what runs in it, hence the comparison.
+fn stderr_is_journal() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(stream) = std::env::var_os("JOURNAL_STREAM") else {
+        return false;
+    };
+    let Some((device, inode)) = stream.to_str().and_then(|stream| stream.split_once(':')) else {
+        return false;
+    };
+    let Ok(stderr) = std::fs::metadata("/proc/self/fd/2") else {
+        return false;
+    };
+    device.parse() == Ok(stderr.dev()) && inode.parse() == Ok(stderr.ino())
 }

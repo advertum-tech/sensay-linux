@@ -2,11 +2,11 @@
 // pasted into the window under the cursor. The macOS version is the model
 // for the behavior.
 //
-//   sensay            run (a second launch says so and exits)
+//   sensay            run (a second launch opens the history of the first)
 //   sensay settings   open the settings of the running app
 //   sensay history    open the history of the running app
 //   sensay about      open the About window of the running app
-//   sensay setup      one-time system setup (step 8)
+//   sensay setup      one-time system setup, for the AppImage
 //
 // Threads: the main thread draws the Settings and History windows (eframe,
 // which winit wants on the main thread); tokio runs everything else on its
@@ -23,6 +23,7 @@ mod config;
 mod controller;
 mod desktop;
 mod error_presenter;
+mod gnome_extension;
 mod hotkey;
 mod history;
 mod log;
@@ -356,13 +357,16 @@ fn start_hotkey(key: ActivationKey, events: &mpsc::UnboundedSender<HotkeyEvent>,
 /// Another process owns the name: pass the command on and exit.
 async fn hand_over(connection: &Connection, mode: Mode) -> ExitCode {
     let command = match mode {
+        // As opening the app again on macOS: the history comes up.
+        Mode::Run => {
+            eprintln!("sensay: already running, opening the history");
+            Command::OpenHistory
+        }
         Mode::Settings => Command::OpenSettings,
         Mode::History => Command::OpenHistory,
         Mode::About => Command::OpenAbout,
-        Mode::Run | Mode::Setup => {
-            eprintln!("sensay: already running");
-            return ExitCode::SUCCESS;
-        }
+        // Handled before the bus is claimed.
+        Mode::Setup => return ExitCode::SUCCESS,
     };
     match bus::send(connection, command).await {
         Ok(()) => ExitCode::SUCCESS,
