@@ -13,6 +13,7 @@
 // (libraries.rs), and a panic inside a run is caught; after one the windows
 // stay closed until Sensay restarts, and dictation goes on.
 
+mod about;
 mod fonts;
 mod frame;
 mod history;
@@ -40,6 +41,7 @@ use crate::log;
 pub enum WindowKind {
     Settings,
     History,
+    About,
 }
 
 pub enum UiCommand {
@@ -268,6 +270,11 @@ fn viewport(kind: WindowKind) -> egui::ViewportBuilder {
             .with_title("History")
             .with_inner_size([880.0, 620.0])
             .with_min_inner_size([620.0, 360.0]),
+        // The height follows the content (`fit`).
+        WindowKind::About => builder
+            .with_title("About Sensay")
+            .with_inner_size([380.0, 240.0])
+            .with_min_inner_size([320.0, 160.0]),
     }
 }
 
@@ -280,6 +287,7 @@ struct Windows {
     second_at: Option<egui::Pos2>,
     settings: settings::SettingsWindow,
     history: history::HistoryWindow,
+    about: about::AboutWindow,
     bridge: Arc<Bridge>,
     mailbox: Arc<Mailbox>,
     quit: Arc<Mutex<bool>>,
@@ -300,6 +308,7 @@ impl Windows {
             second_at: None,
             settings: settings::SettingsWindow::new(),
             history: history::HistoryWindow::new(),
+            about: about::AboutWindow::new(),
             bridge,
             mailbox,
             quit,
@@ -339,6 +348,7 @@ impl Windows {
         match kind {
             WindowKind::Settings => self.settings = settings::SettingsWindow::new(),
             WindowKind::History => self.history = history::HistoryWindow::new(),
+            WindowKind::About => self.about = about::AboutWindow::new(),
         }
     }
 
@@ -346,6 +356,7 @@ impl Windows {
         let (title, resizable, view) = match kind {
             WindowKind::Settings => ("Settings", false, false),
             WindowKind::History => ("History", true, true),
+            WindowKind::About => ("About Sensay", false, false),
         };
         let (content, close) = frame::window(ui, title, resizable, view);
         if close {
@@ -358,6 +369,10 @@ impl Windows {
                 fit(ui.ctx(), height + frame::HEADER_HEIGHT);
             }
             WindowKind::History => self.history.ui(&mut inner, &self.bridge),
+            WindowKind::About => {
+                let height = self.about.ui(&mut inner);
+                fit(ui.ctx(), height + frame::HEADER_HEIGHT);
+            }
         }
     }
 }
@@ -381,6 +396,7 @@ fn viewport_id(kind: WindowKind) -> egui::ViewportId {
     egui::ViewportId::from_hash_of(match kind {
         WindowKind::Settings => "sensay-settings",
         WindowKind::History => "sensay-history",
+        WindowKind::About => "sensay-about",
     })
 }
 

@@ -79,6 +79,12 @@ impl ksni::Tray for SensayTray {
             }
             .into(),
             StandardItem {
+                label: "About Sensay".to_string(),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::OpenAbout)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Settings…".to_string(),
                 activate: Box::new(|tray: &mut Self| tray.send(Command::OpenSettings)),
                 ..Default::default()

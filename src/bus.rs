@@ -35,6 +35,10 @@ impl AppInterface {
         self.forward(Command::OpenHistory);
     }
 
+    fn open_about(&self) {
+        self.forward(Command::OpenAbout);
+    }
+
     fn quit(&self) {
         self.forward(Command::Quit);
     }
@@ -48,6 +52,7 @@ impl AppInterface {
 trait App {
     fn open_settings(&self) -> zbus::Result<()>;
     fn open_history(&self) -> zbus::Result<()>;
+    fn open_about(&self) -> zbus::Result<()>;
 }
 
 pub enum Instance {
@@ -84,6 +89,7 @@ pub async fn send(connection: &Connection, command: Command) -> zbus::Result<()>
     match command {
         Command::OpenSettings => app.open_settings().await,
         Command::OpenHistory => app.open_history().await,
+        Command::OpenAbout => app.open_about().await,
         Command::SettingsChanged | Command::Quit => Ok(()),
     }
 }

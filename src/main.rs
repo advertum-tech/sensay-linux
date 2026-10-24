@@ -5,6 +5,7 @@
 //   sensay            run (a second launch says so and exits)
 //   sensay settings   open the settings of the running app
 //   sensay history    open the history of the running app
+//   sensay about      open the About window of the running app
 //   sensay setup      one-time system setup (step 8)
 //
 // Threads: the main thread draws the Settings and History windows (eframe,
@@ -13,6 +14,7 @@
 // on a std thread of its own; sound is recorded on a std thread named audio
 // (libpulse).
 
+mod app_id;
 mod asr;
 mod audio;
 mod autostart;
@@ -54,6 +56,7 @@ use crate::ui::{Bridge, UiCommand, WindowKind};
 pub enum Command {
     OpenSettings,
     OpenHistory,
+    OpenAbout,
     /// The Settings window changed the shared settings.
     SettingsChanged,
     Quit,
@@ -63,10 +66,11 @@ enum Mode {
     Run,
     Settings,
     History,
+    About,
     Setup,
 }
 
-const USAGE: &str = "usage: sensay [settings | history | setup]";
+const USAGE: &str = "usage: sensay [settings | history | about | setup]";
 
 fn main() -> ExitCode {
     let mode = match parse_args(std::env::args_os().skip(1)) {
@@ -114,6 +118,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Mode, String> 
     match first.to_str() {
         Some("settings") => Ok(Mode::Settings),
         Some("history") => Ok(Mode::History),
+        Some("about") => Ok(Mode::About),
         Some("setup") => Ok(Mode::Setup),
         _ => Err(format!("unknown command {}", first.to_string_lossy())),
     }
@@ -236,6 +241,9 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
         Mode::History => {
             let _ = commands_tx.send(Command::OpenHistory);
         }
+        Mode::About => {
+            let _ = commands_tx.send(Command::OpenAbout);
+        }
         Mode::Run | Mode::Setup => {}
     }
 
@@ -252,6 +260,9 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
                 }
                 Command::OpenHistory => {
                     let _ = ui.send(UiCommand::Show(WindowKind::History));
+                }
+                Command::OpenAbout => {
+                    let _ = ui.send(UiCommand::Show(WindowKind::About));
                 }
                 Command::SettingsChanged => {
                     let wanted = shared_config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
@@ -331,6 +342,7 @@ async fn hand_over(connection: &Connection, mode: Mode) -> ExitCode {
     let command = match mode {
         Mode::Settings => Command::OpenSettings,
         Mode::History => Command::OpenHistory,
+        Mode::About => Command::OpenAbout,
         Mode::Run | Mode::Setup => {
             eprintln!("sensay: already running");
             return ExitCode::SUCCESS;
