@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 pub use retention::sweep;
 use store::Store;
 
+use crate::asr::Refusal;
 use crate::log;
 use crate::paths;
 
@@ -87,6 +88,8 @@ pub struct Transcript {
     /// used-up limit counts down to its reset, which would be wrong in the
     /// history an hour later. Not stored.
     pub notice: Option<String>,
+    /// Ban or limit when the Sensay API refused the request. Not stored.
+    pub refusal: Option<Refusal>,
 }
 
 impl Transcript {
@@ -104,6 +107,7 @@ impl Transcript {
             recognition_seconds: None,
             failure_reason: None,
             notice: None,
+            refusal: None,
         }
     }
 }

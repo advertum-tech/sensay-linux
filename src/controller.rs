@@ -343,7 +343,7 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
                 .or(row.failure_reason.as_deref())
                 .unwrap_or("Recognition failed.");
             log::error!(App, "[{tag}] {reason}");
-            errors.show(reason);
+            errors.show_with(reason, row.refusal);
         }
         TranscriptState::Recorded | TranscriptState::Sending | TranscriptState::Recognising => {}
     }

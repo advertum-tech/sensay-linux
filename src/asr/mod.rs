@@ -37,7 +37,7 @@ const BANNED: &str =
 /// in the history for every used-up limit.
 const LIMIT_REACHED: &str = "Daily limit reached.";
 
-/// "Sensay/0.1.0 (Ubuntu 22.04; x86_64)" for the Sensay API: the build, the
+/// "Sensay/0.2.1 (Ubuntu 22.04; x86_64)" for the Sensay API: the build, the
 /// system and the processor. Worked out once.
 static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
     let agent = format!(
@@ -151,6 +151,14 @@ impl TranscriptionError {
         match self {
             TranscriptionError::Refused(Refusal::Limit, _) => LIMIT_REACHED.to_string(),
             other => other.message(),
+        }
+    }
+
+    /// Ban or limit when the Sensay API refused the dictation.
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            TranscriptionError::Refused(refusal, _) => Some(*refusal),
+            _ => None,
         }
     }
 }

@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, watch};
 use zbus::Connection;
 use zbus::zvariant::Value;
 
+use crate::asr::Refusal;
 use crate::log;
 
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
@@ -34,6 +35,9 @@ const LAST_ERROR_LIFETIME: Duration = Duration::from_secs(60 * 60);
 #[derive(Clone)]
 pub struct LastError {
     pub message: String,
+    /// Ban or limit when the Sensay API refused the dictation: the menu gives
+    /// those their own icons.
+    pub refusal: Option<Refusal>,
     at: SystemTime,
 }
 
@@ -77,9 +81,15 @@ impl ErrorPresenter {
     }
 
     pub fn show(&self, message: &str) {
+        self.show_with(message, None);
+    }
+
+    /// show(), with the reason when the Sensay API refused the dictation.
+    pub fn show_with(&self, message: &str, refusal: Option<Refusal>) {
         log::info!(App, "error shown: {message}");
         self.last.send_replace(Some(LastError {
             message: message.to_string(),
+            refusal,
             at: SystemTime::now(),
         }));
         // Without a session bus there is no task to receive it.
