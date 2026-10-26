@@ -184,8 +184,6 @@ pub struct Config {
     pub speech_service: SpeechService,
     /// Where Local is sent: an http or https address.
     pub local_address: String,
-    /// Empty means the request goes without an authorization header.
-    pub api_key: String,
     pub activation_key: ActivationKey,
     pub microphone: Microphone,
 }
@@ -195,7 +193,6 @@ impl Default for Config {
         Config {
             speech_service: SpeechService::FALLBACK,
             local_address: DEFAULT_LOCAL_ADDRESS.to_string(),
-            api_key: String::new(),
             activation_key: ActivationKey::FALLBACK,
             microphone: Microphone::FALLBACK,
         }
@@ -228,9 +225,6 @@ speech_service = {}
 # Where "local" is sent: an http or https address.
 local_address = {}
 
-# Sent as X-Api-Key and as Authorization: Bearer when not empty.
-api_key = {}
-
 # "ctrl+super" (hold either Ctrl with either Super), or one evdev key name:
 # KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT, KEY_SCROLLLOCK, KEY_PAUSE.
 activation_key = {}
@@ -240,14 +234,13 @@ microphone = {}
 "#,
         quote(config.speech_service.as_str()),
         quote(&config.local_address),
-        quote(&config.api_key),
         quote(&config.activation_key.to_string()),
         quote(&config.microphone.to_string()),
     )
 }
 
 /// Writes the settings. Written beside the file and renamed over it, so a
-/// crash never leaves half a file; mode 0600, the file holds the API key.
+/// crash never leaves half a file; mode 0600.
 pub fn save(config: &Config) -> io::Result<()> {
     let path = path().ok_or_else(|| io::Error::other("neither XDG_CONFIG_HOME nor HOME is set"))?;
     if let Some(dir) = path.parent() {
@@ -273,7 +266,6 @@ pub fn save(config: &Config) -> io::Result<()> {
 struct RawConfig {
     speech_service: Option<toml::Value>,
     local_address: Option<toml::Value>,
-    api_key: Option<toml::Value>,
     activation_key: Option<toml::Value>,
     microphone: Option<toml::Value>,
 }
@@ -333,7 +325,7 @@ fn create(path: &Path) -> io::Result<()> {
     file.write_all(render(&Config::default()).as_bytes())
 }
 
-/// The file holds the API key, so it is kept readable by its owner only.
+/// Keeps the file readable by its owner only.
 fn tighten_mode(path: &Path) {
     let Ok(metadata) = fs::metadata(path) else { return };
     let mode = metadata.permissions().mode() & 0o777;
@@ -376,15 +368,6 @@ fn parse(text: &str, path: &Path) -> Config {
             defaults.local_address.clone(),
             DEFAULT_LOCAL_ADDRESS,
         ),
-        // The key itself never goes to the log.
-        api_key: match raw.api_key {
-            None => defaults.api_key,
-            Some(toml::Value::String(key)) => key.trim().to_string(),
-            Some(_) => {
-                log::error!(App, "settings: api_key is not a string, using empty");
-                defaults.api_key
-            }
-        },
         activation_key: field(
             "activation_key",
             raw.activation_key,

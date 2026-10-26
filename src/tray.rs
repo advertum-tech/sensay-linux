@@ -16,7 +16,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use crate::Command;
-use crate::asr::Refusal;
 use crate::error_presenter::LastError;
 use crate::log;
 
@@ -103,20 +102,6 @@ impl ksni::Tray for SensayTray {
             StandardItem {
                 label: "Settings…".to_string(),
                 activate: Box::new(|tray: &mut Self| tray.send(Command::OpenSettings)),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            // Temporary: how a refusal from the Sensay API looks.
-            StandardItem {
-                label: "Test: ban error".to_string(),
-                activate: Box::new(|tray: &mut Self| tray.send(Command::TestError(Refusal::Ban))),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Test: limit error".to_string(),
-                activate: Box::new(|tray: &mut Self| tray.send(Command::TestError(Refusal::Limit))),
                 ..Default::default()
             }
             .into(),

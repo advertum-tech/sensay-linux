@@ -3,10 +3,10 @@
 // title of each row on the left and its control on the right.
 //
 // Values are written as they are changed, with no OK button, and the app
-// picks each change up at once: the service, the Local address and the key
-// for the next row sent, the activation key by restarting the key listener,
-// the microphone from the next press. The Local address is written when
-// typing in it ends, never half-typed.
+// picks each change up at once: the service and the Local address for the
+// next row sent, the activation key by restarting the key listener, the
+// microphone from the next press. The Local address is written when typing
+// in it ends, never half-typed.
 
 use eframe::egui;
 use egui::epaint::text::VariationCoords;
@@ -78,9 +78,6 @@ impl Palette {
 }
 
 pub struct SettingsWindow {
-    /// The field's own text, so a key typed with a space at either end is not
-    /// cut while being typed; the stored key is trimmed.
-    api_key: Option<String>,
     /// The Local field's own text; the stored address changes only when
     /// typing ends with an http or https address.
     local_address: Option<String>,
@@ -90,7 +87,6 @@ pub struct SettingsWindow {
 impl SettingsWindow {
     pub fn new() -> SettingsWindow {
         SettingsWindow {
-            api_key: None,
             local_address: None,
             autostart: autostart::is_enabled(),
         }
@@ -143,16 +139,6 @@ impl SettingsWindow {
                             config.speech_service = service;
                         }
                     }
-                    let api_key = self.api_key.get_or_insert_with(|| stored.api_key.clone());
-                    control_row(ui, &palette, false, "API key", |ui| {
-                        let field = egui::TextEdit::singleline(api_key)
-                            .password(true)
-                            .hint_text("empty means no key is sent")
-                            .desired_width(FIELD_WIDTH);
-                        if ui.add(field).changed() {
-                            config.api_key = api_key.trim().to_string();
-                        }
-                    });
                 });
 
                 ui.add_space(GROUP_GAP);

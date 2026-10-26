@@ -14,7 +14,7 @@ use std::io;
 use std::path::Path;
 use std::sync::LazyLock;
 use std::task::Poll;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bytes::Bytes;
 use reqwest::multipart::{Form, Part};
@@ -66,8 +66,6 @@ pub struct ServiceSettings {
     pub service: SpeechService,
     /// Where Local is sent.
     pub local_address: String,
-    /// Empty means the request goes without an authorization header.
-    pub api_key: String,
 }
 
 impl ServiceSettings {
@@ -128,7 +126,7 @@ impl TranscriptionError {
             TranscriptionError::BadAudio => {
                 "The recording was not accepted by the speech service.".to_string()
             }
-            TranscriptionError::Unauthorized => "The speech service refused the API key.".to_string(),
+            TranscriptionError::Unauthorized => "The speech service refused the request.".to_string(),
             TranscriptionError::Restarting => {
                 "The speech service is restarting. Try again in a moment.".to_string()
             }
@@ -217,11 +215,6 @@ pub async fn transcribe(
             request = request.header("X-App-ID", app_id);
         }
     }
-    if !settings.api_key.is_empty() {
-        request = request
-            .header("X-Api-Key", &settings.api_key)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", settings.api_key));
-    }
 
     // The whole request against one clock, the answer included: a service
     // that keeps the connection open while saying nothing is caught too.
@@ -251,8 +244,8 @@ pub async fn transcribe(
 }
 
 /// Maps the status code to the cases the user is shown. A 403 or 429 with
-/// the Sensay API's reason in it is a refusal; without one, a 403 is a
-/// refused key as before.
+/// the Sensay API's reason in it is a refusal; without one, it is mapped as
+/// before.
 fn check(status: StatusCode, body: &[u8]) -> Result<(), TranscriptionError> {
     if matches!(status.as_u16(), 403 | 429) {
         if let Some(refused) = refusal(body) {
@@ -287,41 +280,6 @@ fn refusal(body: &[u8]) -> Option<TranscriptionError> {
         _ => return None,
     };
     Some(TranscriptionError::Refused(refusal, payload.error.message.unwrap_or_default()))
-}
-
-/// What the tray's two test items show while the wording is checked: the
-/// answer the Sensay API gives for a ban or a used-up limit, read the way a
-/// real one is. Temporary.
-pub fn sample_refusal(refusal: Refusal) -> TranscriptionError {
-    let (status, kind, message) = match refusal {
-        Refusal::Ban => (StatusCode::FORBIDDEN, "ban", BANNED.to_string()),
-        Refusal::Limit => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "limit",
-            format!(
-                "Daily limit of 10,000 words reached. It resets in {}.",
-                until_midnight_utc(SystemTime::now())
-            ),
-        ),
-    };
-    let body = serde_json::json!({ "error": { "type": kind, "message": message } }).to_string();
-    match check(status, body.as_bytes()) {
-        Err(error) => error,
-        Ok(()) => TranscriptionError::Failed(status.as_u16()),
-    }
-}
-
-/// The time to the next midnight UTC, when the daily limit resets, rounded
-/// up to the minute: "5 h 12 min", "3 h", "40 min".
-fn until_midnight_utc(now: SystemTime) -> String {
-    const DAY: u128 = 24 * 60 * 60 * 1000;
-    let since_epoch = now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-    let minutes = (DAY - since_epoch % DAY).div_ceil(60 * 1000);
-    match (minutes / 60, minutes % 60) {
-        (0, minutes) => format!("{minutes} min"),
-        (hours, 0) => format!("{hours} h"),
-        (hours, minutes) => format!("{hours} h {minutes} min"),
-    }
 }
 
 /// The distribution and its version from os-release(5): "Ubuntu 22.04", or
@@ -439,29 +397,6 @@ mod tests {
         let ban = TranscriptionError::Refused(Refusal::Ban, String::new());
         assert_eq!(ban.message(), BANNED);
         assert_eq!(ban.history_text(), BANNED);
-    }
-
-    #[test]
-    fn test_items_go_the_way_of_a_real_answer() {
-        assert_eq!(
-            sample_refusal(Refusal::Ban),
-            TranscriptionError::Refused(Refusal::Ban, BANNED.to_string())
-        );
-        let limit = sample_refusal(Refusal::Limit).message();
-        assert!(limit.starts_with("Daily limit of 10,000 words reached. It resets in "), "{limit}");
-    }
-
-    #[test]
-    fn the_limit_resets_at_midnight_utc() {
-        let day = UNIX_EPOCH + Duration::from_secs(20_000 * 86_400);
-        let at = |hours: u64, minutes: u64, seconds: u64| {
-            until_midnight_utc(day + Duration::from_secs(hours * 3600 + minutes * 60 + seconds))
-        };
-        assert_eq!(at(18, 48, 0), "5 h 12 min");
-        assert_eq!(at(18, 47, 30), "5 h 13 min");
-        assert_eq!(at(21, 0, 0), "3 h");
-        assert_eq!(at(23, 20, 0), "40 min");
-        assert_eq!(at(23, 59, 59), "1 min");
     }
 
     #[test]
