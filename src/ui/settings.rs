@@ -3,9 +3,10 @@
 // title of each row on the left and its control on the right.
 //
 // Values are written as they are changed, with no OK button, and the app
-// picks each change up at once: the service and the key for the next row
-// sent, the activation key by restarting the key listener, the microphone
-// from the next press.
+// picks each change up at once: the service, the Local address and the key
+// for the next row sent, the activation key by restarting the key listener,
+// the microphone from the next press. The Local address is written when
+// typing in it ends, never half-typed.
 
 use eframe::egui;
 use egui::epaint::text::VariationCoords;
@@ -80,6 +81,9 @@ pub struct SettingsWindow {
     /// The field's own text, so a key typed with a space at either end is not
     /// cut while being typed; the stored key is trimmed.
     api_key: Option<String>,
+    /// The Local field's own text; the stored address changes only when
+    /// typing ends with an http or https address.
+    local_address: Option<String>,
     autostart: bool,
 }
 
@@ -87,6 +91,7 @@ impl SettingsWindow {
     pub fn new() -> SettingsWindow {
         SettingsWindow {
             api_key: None,
+            local_address: None,
             autostart: autostart::is_enabled(),
         }
     }
@@ -113,7 +118,28 @@ impl SettingsWindow {
                 card(ui, &palette, |ui| {
                     for (index, service) in SpeechService::ALL.into_iter().enumerate() {
                         let chosen = config.speech_service == service;
-                        if choice_row(ui, &palette, index == 0, chosen, service.title(), Some(service.url())) {
+                        // The Sensay rows show no address: it is the API's,
+                        // not a choice.
+                        let row = choice_row(ui, &palette, index == 0, chosen, service.title(), None);
+                        if service == SpeechService::Local {
+                            // Live only while Local is chosen. An address that
+                            // is not http or https is not kept, and the field
+                            // goes back to the one in use.
+                            let text = self.local_address.get_or_insert_with(|| stored.local_address.clone());
+                            let field = egui::TextEdit::singleline(text)
+                                .hint_text(config::DEFAULT_LOCAL_ADDRESS)
+                                .desired_width(FIELD_WIDTH);
+                            if trailing(ui, row.rect, |ui| ui.add_enabled(chosen, field)).lost_focus() {
+                                match config::web_address(text) {
+                                    Some(address) => {
+                                        *text = address.clone();
+                                        config.local_address = address;
+                                    }
+                                    None => *text = stored.local_address.clone(),
+                                }
+                            }
+                        }
+                        if row.clicked() {
                             config.speech_service = service;
                         }
                     }
@@ -227,8 +253,16 @@ fn row_rect(ui: &mut Ui, palette: &Palette, first: bool, height: f32, sense: Sen
 }
 
 /// A row that is one of several choices: a round mark on the left, the
-/// title, and under it in grey what it stands for. The whole row is clicked.
-fn choice_row(ui: &mut Ui, palette: &Palette, first: bool, chosen: bool, title: &str, subtitle: Option<&str>) -> bool {
+/// title, and under it in grey what it stands for. The whole row is clicked,
+/// except a control put on it afterwards.
+fn choice_row(
+    ui: &mut Ui,
+    palette: &Palette,
+    first: bool,
+    chosen: bool,
+    title: &str,
+    subtitle: Option<&str>,
+) -> egui::Response {
     let height = if subtitle.is_some() { TWO_LINE_HEIGHT } else { ROW_HEIGHT };
     let response = row_rect(ui, palette, first, height, Sense::click());
     let rect = response.rect;
@@ -252,7 +286,7 @@ fn choice_row(ui: &mut Ui, palette: &Palette, first: bool, chosen: bool, title: 
             painter.text(egui::pos2(left, rect.center().y), egui::Align2::LEFT_CENTER, title, body(ui), palette.text);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The title on the left, `control` against the right edge.
@@ -265,15 +299,20 @@ fn control_row(ui: &mut Ui, palette: &Palette, first: bool, title: &str, control
         body(ui),
         palette.text,
     );
-    // A child that is not allocated in the row's parent: the row already has
-    // its height, and the control must not move the next row up.
+    trailing(ui, rect, control);
+}
+
+/// Runs `control` against the right edge of the row at `rect`. A child that
+/// is not allocated in the row's parent: the row already has its height, and
+/// the control must not move the next row up.
+fn trailing<R>(ui: &mut Ui, rect: egui::Rect, control: impl FnOnce(&mut Ui) -> R) -> R {
     let place = rect.shrink2(egui::vec2(ROW_PADDING, 6.0));
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(place)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
-    control(&mut child);
+    control(&mut child)
 }
 
 /// The title on the left, a switch on the right; the whole row flips it.
@@ -379,7 +418,7 @@ fn microphones(ui: &mut Ui, palette: &Palette, inputs: &Inputs, chosen: &mut Mic
             // With the chosen device unplugged nothing would be marked; the
             // first row says what is used now.
             let marked = index == current.unwrap_or(0);
-            if choice_row(ui, palette, index == 0, marked, title, subtitle.as_deref()) {
+            if choice_row(ui, palette, index == 0, marked, title, subtitle.as_deref()).clicked() {
                 *chosen = selection.clone();
             }
         }

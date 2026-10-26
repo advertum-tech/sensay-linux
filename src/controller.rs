@@ -316,6 +316,8 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
     match row.state {
         TranscriptState::Done => {
             log::info!(Asr, "[{tag}] text: {}", row.text);
+            // A dictation went through: whatever went wrong before is over.
+            errors.clear();
             let waited = key_up_at.elapsed();
             if waited > PASTE_WINDOW {
                 log::info!(
@@ -335,7 +337,11 @@ async fn finish(tag: String, recording: Recording, key_up_at: Instant, services:
             log::info!(Storage, "[{tag}] no text returned, row kept with its audio");
         }
         TranscriptState::Failed => {
-            let reason = row.failure_reason.as_deref().unwrap_or("Recognition failed.");
+            let reason = row
+                .notice
+                .as_deref()
+                .or(row.failure_reason.as_deref())
+                .unwrap_or("Recognition failed.");
             log::error!(App, "[{tag}] {reason}");
             errors.show(reason);
         }

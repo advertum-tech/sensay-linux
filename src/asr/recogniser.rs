@@ -166,7 +166,8 @@ impl Inner {
             }
             Err(error) => {
                 row.state = TranscriptState::Failed;
-                row.failure_reason = Some(error.message());
+                row.failure_reason = Some(error.history_text());
+                row.notice = Some(error.message());
                 log::error!(Asr, "[{tag}] failed after {elapsed:.2} s: {error:?}");
             }
         }

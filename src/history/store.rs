@@ -170,6 +170,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Transcript> {
         model: row.get(7)?,
         recognition_seconds: row.get(8)?,
         failure_reason: row.get(9)?,
+        notice: None,
     })
 }
 

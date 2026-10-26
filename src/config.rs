@@ -17,7 +17,10 @@ use serde::Deserialize;
 
 use crate::log;
 
-/// Which of the three services dictation is sent to.
+/// Which of the three services dictation is sent to. Sensay Whisper and
+/// Sensay Parakeet go through the Sensay API, which picks the model by the
+/// request's `model` field; Local is a server the user runs, at the address
+/// in the settings.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SpeechService {
     Whisper,
@@ -33,8 +36,8 @@ impl SpeechService {
 
     pub fn title(self) -> &'static str {
         match self {
-            SpeechService::Whisper => "Whisper",
-            SpeechService::Parakeet => "Parakeet",
+            SpeechService::Whisper => "Sensay Whisper",
+            SpeechService::Parakeet => "Sensay Parakeet",
             SpeechService::Local => "Local",
         }
     }
@@ -56,12 +59,13 @@ impl SpeechService {
         }
     }
 
-    /// Base address; the request goes to `/v1/audio/transcriptions` under it.
-    pub fn url(self) -> &'static str {
+    /// The value of the request's `model` field. A local server gets the
+    /// request as before, without it.
+    pub fn model(self) -> Option<&'static str> {
         match self {
-            SpeechService::Whisper => "https://whisper.hallstain.me",
-            SpeechService::Parakeet => "https://parakeet.hallstain.me",
-            SpeechService::Local => "http://127.0.0.1:9410",
+            SpeechService::Whisper => Some("whisper"),
+            SpeechService::Parakeet => Some("parakeet"),
+            SpeechService::Local => None,
         }
     }
 
@@ -69,9 +73,9 @@ impl SpeechService {
     /// question, as logName on macOS.
     pub fn log_name(self) -> &'static str {
         match self {
-            SpeechService::Whisper => "hallstain-whisper",
-            SpeechService::Parakeet => "hallstain-parakeet",
-            SpeechService::Local => "localhost",
+            SpeechService::Whisper => "sensay-whisper",
+            SpeechService::Parakeet => "sensay-parakeet",
+            SpeechService::Local => "local",
         }
     }
 }
@@ -178,6 +182,8 @@ impl fmt::Display for ActivationKey {
 #[derive(Clone, PartialEq)]
 pub struct Config {
     pub speech_service: SpeechService,
+    /// Where Local is sent: an http or https address.
+    pub local_address: String,
     /// Empty means the request goes without an authorization header.
     pub api_key: String,
     pub activation_key: ActivationKey,
@@ -188,11 +194,24 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             speech_service: SpeechService::FALLBACK,
+            local_address: DEFAULT_LOCAL_ADDRESS.to_string(),
             api_key: String::new(),
             activation_key: ActivationKey::FALLBACK,
             microphone: Microphone::FALLBACK,
         }
     }
+}
+
+/// Where Local is sent until another address is saved.
+pub const DEFAULT_LOCAL_ADDRESS: &str = "http://127.0.0.1:9410";
+
+/// The address trimmed, when it is an http or https URL with a host; None
+/// for anything else, which is never stored.
+pub fn web_address(raw: &str) -> Option<String> {
+    let address = raw.trim();
+    let url = reqwest::Url::parse(address).ok()?;
+    let web = matches!(url.scheme(), "http" | "https") && url.host_str().is_some_and(|host| !host.is_empty());
+    web.then(|| address.to_string())
 }
 
 /// The file as it is written, with these values.
@@ -202,8 +221,12 @@ fn render(config: &Config) -> String {
         r#"# Sensay settings. The Settings window writes here; edits by hand count
 # from the next launch.
 
-# Speech service: "whisper", "parakeet" or "local".
+# Speech service: "whisper" (Sensay Whisper), "parakeet" (Sensay Parakeet)
+# or "local".
 speech_service = {}
+
+# Where "local" is sent: an http or https address.
+local_address = {}
 
 # Sent as X-Api-Key and as Authorization: Bearer when not empty.
 api_key = {}
@@ -216,6 +239,7 @@ activation_key = {}
 microphone = {}
 "#,
         quote(config.speech_service.as_str()),
+        quote(&config.local_address),
         quote(&config.api_key),
         quote(&config.activation_key.to_string()),
         quote(&config.microphone.to_string()),
@@ -248,6 +272,7 @@ pub fn save(config: &Config) -> io::Result<()> {
 #[derive(Deserialize)]
 struct RawConfig {
     speech_service: Option<toml::Value>,
+    local_address: Option<toml::Value>,
     api_key: Option<toml::Value>,
     activation_key: Option<toml::Value>,
     microphone: Option<toml::Value>,
@@ -344,6 +369,13 @@ fn parse(text: &str, path: &Path) -> Config {
             defaults.speech_service,
             SpeechService::as_str(defaults.speech_service),
         ),
+        local_address: field(
+            "local_address",
+            raw.local_address,
+            web_address,
+            defaults.local_address.clone(),
+            DEFAULT_LOCAL_ADDRESS,
+        ),
         // The key itself never goes to the log.
         api_key: match raw.api_key {
             None => defaults.api_key,
@@ -387,4 +419,20 @@ fn field<T>(
     }
     log::error!(App, "settings: unknown {name} {value}, using {fallback_name}");
     fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_address;
+
+    #[test]
+    fn only_http_and_https_addresses_are_kept() {
+        assert_eq!(web_address(" http://127.0.0.1:9410 ").as_deref(), Some("http://127.0.0.1:9410"));
+        assert_eq!(web_address("https://asr.example.com/base").as_deref(), Some("https://asr.example.com/base"));
+        assert_eq!(web_address("127.0.0.1:9410"), None);
+        assert_eq!(web_address("localhost:9410"), None);
+        assert_eq!(web_address("ftp://example.com"), None);
+        assert_eq!(web_address("http://"), None);
+        assert_eq!(web_address(""), None);
+    }
 }

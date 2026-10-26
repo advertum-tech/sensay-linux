@@ -90,7 +90,7 @@ pub async fn send(connection: &Connection, command: Command) -> zbus::Result<()>
         Command::OpenSettings => app.open_settings().await,
         Command::OpenHistory => app.open_history().await,
         Command::OpenAbout => app.open_about().await,
-        Command::SettingsChanged | Command::Quit => Ok(()),
+        Command::SettingsChanged | Command::TestError(_) | Command::Quit => Ok(()),
     }
 }
 

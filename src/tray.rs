@@ -16,7 +16,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use crate::Command;
+use crate::asr::Refusal;
+use crate::error_presenter::LastError;
 use crate::log;
+
+/// How often the menu is built anew while it shows an error: the age in it
+/// counts in minutes, and the error goes after an hour.
+const AGE_STEP: Duration = Duration::from_secs(60);
 
 const MAX_ATTEMPTS: u32 = 10;
 const FIRST_PAUSE: Duration = Duration::from_secs(1);
@@ -29,8 +35,9 @@ const ICON_SIZES: [i32; 6] = [16, 22, 24, 32, 48, 64];
 
 pub struct SensayTray {
     commands: UnboundedSender<Command>,
-    /// From the ErrorPresenter; None until the first error.
-    last_error: Option<String>,
+    /// From the ErrorPresenter: the error the menu shows, None when there is
+    /// none now.
+    last_error: Option<LastError>,
 }
 
 impl SensayTray {
@@ -60,19 +67,26 @@ impl ksni::Tray for SensayTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        vec![
+        let mut items: Vec<MenuItem<Self>> = vec![
             StandardItem {
                 label: "Sensay".to_string(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
-            StandardItem {
-                label: format!("Last error: {}", self.last_error.as_deref().unwrap_or("none")),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
+        ];
+        // Only an error that is still current; with none, no item at all.
+        if let Some(error) = self.last_error.as_ref().filter(|error| error.is_current()) {
+            items.push(
+                StandardItem {
+                    label: last_error_label(error),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.extend([
             MenuItem::Separator,
             StandardItem {
                 label: "History".to_string(),
@@ -93,13 +107,28 @@ impl ksni::Tray for SensayTray {
             }
             .into(),
             MenuItem::Separator,
+            // Temporary: how a refusal from the Sensay API looks.
+            StandardItem {
+                label: "Test: ban error".to_string(),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::TestError(Refusal::Ban))),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Test: limit error".to_string(),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::TestError(Refusal::Limit))),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
             StandardItem {
                 label: "Quit Sensay".to_string(),
                 activate: Box::new(|tray: &mut Self| tray.send(Command::Quit)),
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 
     fn watcher_online(&self) {
@@ -117,7 +146,7 @@ impl ksni::Tray for SensayTray {
 /// attempt failed; the app then runs without an icon.
 pub async fn start(
     commands: UnboundedSender<Command>,
-    mut last_error: watch::Receiver<Option<String>>,
+    mut last_error: watch::Receiver<Option<LastError>>,
 ) -> Option<Handle<SensayTray>> {
     let mut pause = FIRST_PAUSE;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -150,14 +179,39 @@ pub async fn start(
     None
 }
 
-/// Puts each new error message into the menu, until the icon goes away.
-async fn follow_last_error(handle: Handle<SensayTray>, mut last_error: watch::Receiver<Option<String>>) {
-    while last_error.changed().await.is_ok() {
-        let message = last_error.borrow_and_update().clone();
-        if handle.update(|tray| tray.last_error = message).await.is_none() {
+/// Puts each new error into the menu and takes it out once it is over; while
+/// one is shown, builds the menu anew every minute for its age. Until the
+/// icon goes away.
+async fn follow_last_error(handle: Handle<SensayTray>, mut last_error: watch::Receiver<Option<LastError>>) {
+    let mut shown = last_error.borrow().clone();
+    loop {
+        tokio::select! {
+            changed = last_error.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                shown = last_error.borrow_and_update().clone();
+            }
+            _ = tokio::time::sleep(AGE_STEP), if shown.is_some() => {
+                shown = shown.filter(LastError::is_current);
+            }
+        }
+        let error = shown.clone();
+        if handle.update(|tray| tray.last_error = error).await.is_none() {
             return;
         }
     }
+}
+
+/// "Last error, 3 min ago: …", with the age as it is when the menu is built.
+fn last_error_label(error: &LastError) -> String {
+    let minutes = error.age().as_secs() / 60;
+    let age = if minutes == 0 {
+        "just now".to_string()
+    } else {
+        format!("{minutes} min ago")
+    };
+    format!("Last error, {age}: {}", error.message)
 }
 
 /// The Sensay logo, `size` pixels square: the brand-orange rounded square

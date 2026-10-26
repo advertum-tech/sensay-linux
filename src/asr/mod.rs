@@ -1,6 +1,7 @@
 // Talks to the speech service over HTTP, as HTTPTranscriptionService.swift.
-// The service is OpenAI-compatible: local, or remote at an https address with
-// an optional key.
+// The service is OpenAI-compatible: the Sensay API, which picks the model by
+// the `model` field and learns from two headers which computer and which
+// build is asking, or a local server, which gets neither.
 //
 // There is no queue here. The order of requests is kept in recogniser.rs, so
 // that a recording still waiting its turn goes to whatever service is chosen
@@ -11,8 +12,9 @@ pub mod recogniser;
 use std::error::Error as _;
 use std::io;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use reqwest::multipart::{Form, Part};
@@ -20,8 +22,37 @@ use reqwest::{Body, Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
+use crate::app_id;
 use crate::config::SpeechService;
 use crate::log;
+
+/// The Sensay API: where Sensay Whisper and Sensay Parakeet are sent. Built
+/// in, not a setting.
+const SENSAY_API: &str = "https://api.sensay.app";
+
+/// Shown for a ban when the API sends no text of its own.
+const BANNED: &str =
+    "Sensay is blocked on this computer. If you think this is a mistake, contact us at hello@advertum.com";
+/// Shown for a used-up limit when the API sends no text of its own, and kept
+/// in the history for every used-up limit.
+const LIMIT_REACHED: &str = "Daily limit reached.";
+
+/// "Sensay/0.1.0 (Ubuntu 22.04; x86_64)" for the Sensay API: the build, the
+/// system and the processor. Worked out once.
+static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
+    let agent = format!(
+        "Sensay/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        system_name(),
+        std::env::consts::ARCH
+    );
+    // A header carries printable ASCII only.
+    agent.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect()
+});
+
+/// Read once: it cannot change while the app runs. None without a machine
+/// id; the request then goes without the header.
+static APP_ID: LazyLock<Option<String>> = LazyLock::new(app_id::app_id);
 
 /// How long one request may take before it counts as unanswered: half a
 /// minute plus twice the length of the recording (RecognitionTiming.swift).
@@ -33,8 +64,21 @@ pub fn timeout(duration: f64) -> Duration {
 #[derive(Clone)]
 pub struct ServiceSettings {
     pub service: SpeechService,
+    /// Where Local is sent.
+    pub local_address: String,
     /// Empty means the request goes without an authorization header.
     pub api_key: String,
+}
+
+impl ServiceSettings {
+    /// The base address; the request goes to `/v1/audio/transcriptions`
+    /// under it.
+    fn address(&self) -> &str {
+        match self.service {
+            SpeechService::Whisper | SpeechService::Parakeet => SENSAY_API,
+            SpeechService::Local => &self.local_address,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +104,18 @@ pub enum TranscriptionError {
     TimedOut(u64),
     /// Any other status.
     Failed(u16),
+    /// HTTP 403 or 429 from the Sensay API with its reason. The text is the
+    /// API's own, shown as it is; empty when the API sent none.
+    Refused(Refusal, String),
+}
+
+/// Why the Sensay API refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The computer is blocked.
+    Ban,
+    /// Its daily limit is used up.
+    Limit,
 }
 
 impl TranscriptionError {
@@ -82,6 +138,21 @@ impl TranscriptionError {
             TranscriptionError::Failed(status) => {
                 format!("The speech service answered with code {status}.")
             }
+            // The API's own text comes first: it can change without a new
+            // build of the app.
+            TranscriptionError::Refused(_, text) if !text.trim().is_empty() => text.clone(),
+            TranscriptionError::Refused(Refusal::Ban, _) => BANNED.to_string(),
+            TranscriptionError::Refused(Refusal::Limit, _) => LIMIT_REACHED.to_string(),
+        }
+    }
+
+    /// What the history keeps: the message, except for a used-up limit. The
+    /// API's text for it counts down to the reset, which read an hour later
+    /// is wrong.
+    pub fn history_text(&self) -> String {
+        match self {
+            TranscriptionError::Refused(Refusal::Limit, _) => LIMIT_REACHED.to_string(),
+            other => other.message(),
         }
     }
 }
@@ -111,11 +182,11 @@ pub async fn transcribe(
     timeout: Duration,
     sent: oneshot::Sender<()>,
 ) -> Result<Transcription, TranscriptionError> {
-    let base = settings.service.url();
+    let base = settings.address();
     let Some(client) = client else {
         return Err(TranscriptionError::ServiceDown(base.to_string()));
     };
-    let endpoint = format!("{base}/v1/audio/transcriptions");
+    let endpoint = format!("{}/v1/audio/transcriptions", base.trim_end_matches('/'));
 
     let audio = match tokio::fs::read(audio).await {
         Ok(audio) => Bytes::from(audio),
@@ -129,11 +200,23 @@ pub async fn transcribe(
         .file_name("audio.wav")
         .mime_str("audio/wav")
         .map_err(|_| TranscriptionError::BadAudio)?;
-    let form = Form::new()
+    let mut form = Form::new()
         .part("file", file)
         .text("response_format", "verbose_json");
+    let model = settings.service.model();
+    if let Some(model) = model {
+        form = form.text("model", model);
+    }
 
     let mut request = client.post(&endpoint).multipart(form);
+    // The Sensay API learns which computer and which build is asking. A
+    // local server gets the request as before.
+    if model.is_some() {
+        request = request.header(reqwest::header::USER_AGENT, USER_AGENT.as_str());
+        if let Some(app_id) = APP_ID.as_deref() {
+            request = request.header("X-App-ID", app_id);
+        }
+    }
     if !settings.api_key.is_empty() {
         request = request
             .header("X-Api-Key", &settings.api_key)
@@ -161,20 +244,108 @@ pub async fn transcribe(
             Err(TranscriptionError::ServiceDown(base.to_string()))
         }
         Ok(Ok((status, body))) => {
-            check(status)?;
+            check(status, &body)?;
             parse(&body)
         }
     }
 }
 
-/// Maps the status code to the cases the user is shown.
-fn check(status: StatusCode) -> Result<(), TranscriptionError> {
+/// Maps the status code to the cases the user is shown. A 403 or 429 with
+/// the Sensay API's reason in it is a refusal; without one, a 403 is a
+/// refused key as before.
+fn check(status: StatusCode, body: &[u8]) -> Result<(), TranscriptionError> {
+    if matches!(status.as_u16(), 403 | 429) {
+        if let Some(refused) = refusal(body) {
+            return Err(refused);
+        }
+    }
     match status.as_u16() {
         200..=299 => Ok(()),
         400 => Err(TranscriptionError::BadAudio),
         401 | 403 => Err(TranscriptionError::Unauthorized),
         503 => Err(TranscriptionError::Restarting),
         other => Err(TranscriptionError::Failed(other)),
+    }
+}
+
+/// The Sensay API's reason, in the OpenAI error format:
+/// `{"error": {"type": "ban" or "limit", "message": "..."}}`.
+fn refusal(body: &[u8]) -> Option<TranscriptionError> {
+    #[derive(Deserialize)]
+    struct Payload {
+        error: Detail,
+    }
+    #[derive(Deserialize)]
+    struct Detail {
+        r#type: Option<String>,
+        message: Option<String>,
+    }
+    let payload: Payload = serde_json::from_slice(body).ok()?;
+    let refusal = match payload.error.r#type.as_deref()? {
+        "ban" => Refusal::Ban,
+        "limit" => Refusal::Limit,
+        _ => return None,
+    };
+    Some(TranscriptionError::Refused(refusal, payload.error.message.unwrap_or_default()))
+}
+
+/// What the tray's two test items show while the wording is checked: the
+/// answer the Sensay API gives for a ban or a used-up limit, read the way a
+/// real one is. Temporary.
+pub fn sample_refusal(refusal: Refusal) -> TranscriptionError {
+    let (status, kind, message) = match refusal {
+        Refusal::Ban => (StatusCode::FORBIDDEN, "ban", BANNED.to_string()),
+        Refusal::Limit => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "limit",
+            format!(
+                "Daily limit of 10,000 words reached. It resets in {}.",
+                until_midnight_utc(SystemTime::now())
+            ),
+        ),
+    };
+    let body = serde_json::json!({ "error": { "type": kind, "message": message } }).to_string();
+    match check(status, body.as_bytes()) {
+        Err(error) => error,
+        Ok(()) => TranscriptionError::Failed(status.as_u16()),
+    }
+}
+
+/// The time to the next midnight UTC, when the daily limit resets, rounded
+/// up to the minute: "5 h 12 min", "3 h", "40 min".
+fn until_midnight_utc(now: SystemTime) -> String {
+    const DAY: u128 = 24 * 60 * 60 * 1000;
+    let since_epoch = now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+    let minutes = (DAY - since_epoch % DAY).div_ceil(60 * 1000);
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+/// The distribution and its version from os-release(5): "Ubuntu 22.04", or
+/// the name alone on a distribution without versions, as Arch.
+fn system_name() -> String {
+    // /usr/lib/os-release is read where /etc has none.
+    let text = ["/etc/os-release", "/usr/lib/os-release"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    os_release_name(&text)
+}
+
+fn os_release_name(text: &str) -> String {
+    let value = |key: &str| {
+        text.lines().find_map(|line| {
+            let value = line.trim().strip_prefix(key)?.strip_prefix('=')?;
+            Some(value.trim_matches(['"', '\'']).to_string()).filter(|value| !value.is_empty())
+        })
+    };
+    let name = value("NAME").unwrap_or_else(|| "Linux".to_string());
+    match value("VERSION_ID") {
+        Some(version) => format!("{name} {version}"),
+        None => name,
     }
 }
 
@@ -235,12 +406,70 @@ mod tests {
 
     #[test]
     fn status_codes_map_to_the_cases_the_user_is_shown() {
-        assert_eq!(check(StatusCode::OK), Ok(()));
-        assert_eq!(check(StatusCode::BAD_REQUEST), Err(TranscriptionError::BadAudio));
-        assert_eq!(check(StatusCode::UNAUTHORIZED), Err(TranscriptionError::Unauthorized));
-        assert_eq!(check(StatusCode::FORBIDDEN), Err(TranscriptionError::Unauthorized));
-        assert_eq!(check(StatusCode::SERVICE_UNAVAILABLE), Err(TranscriptionError::Restarting));
-        assert_eq!(check(StatusCode::BAD_GATEWAY), Err(TranscriptionError::Failed(502)));
+        assert_eq!(check(StatusCode::OK, b""), Ok(()));
+        assert_eq!(check(StatusCode::BAD_REQUEST, b""), Err(TranscriptionError::BadAudio));
+        assert_eq!(check(StatusCode::UNAUTHORIZED, b""), Err(TranscriptionError::Unauthorized));
+        assert_eq!(check(StatusCode::FORBIDDEN, b""), Err(TranscriptionError::Unauthorized));
+        assert_eq!(check(StatusCode::TOO_MANY_REQUESTS, b"{}"), Err(TranscriptionError::Failed(429)));
+        assert_eq!(check(StatusCode::SERVICE_UNAVAILABLE, b""), Err(TranscriptionError::Restarting));
+        assert_eq!(check(StatusCode::BAD_GATEWAY, b""), Err(TranscriptionError::Failed(502)));
+    }
+
+    #[test]
+    fn a_refusal_from_the_sensay_api_is_told_apart() {
+        let ban = br#"{"error":{"type":"ban","message":"Blocked."}}"#;
+        let limit = br#"{"error":{"type":"limit","message":""}}"#;
+        assert_eq!(
+            check(StatusCode::FORBIDDEN, ban),
+            Err(TranscriptionError::Refused(Refusal::Ban, "Blocked.".to_string()))
+        );
+        assert_eq!(
+            check(StatusCode::TOO_MANY_REQUESTS, limit),
+            Err(TranscriptionError::Refused(Refusal::Limit, String::new()))
+        );
+    }
+
+    #[test]
+    fn a_refusal_shows_the_api_text_and_the_history_a_short_one_for_the_limit() {
+        let text = "Daily limit of 10,000 words reached. It resets in 3 h.";
+        let limit = TranscriptionError::Refused(Refusal::Limit, text.to_string());
+        assert_eq!(limit.message(), text);
+        assert_eq!(limit.history_text(), LIMIT_REACHED);
+        assert_eq!(TranscriptionError::Refused(Refusal::Limit, String::new()).message(), LIMIT_REACHED);
+        let ban = TranscriptionError::Refused(Refusal::Ban, String::new());
+        assert_eq!(ban.message(), BANNED);
+        assert_eq!(ban.history_text(), BANNED);
+    }
+
+    #[test]
+    fn test_items_go_the_way_of_a_real_answer() {
+        assert_eq!(
+            sample_refusal(Refusal::Ban),
+            TranscriptionError::Refused(Refusal::Ban, BANNED.to_string())
+        );
+        let limit = sample_refusal(Refusal::Limit).message();
+        assert!(limit.starts_with("Daily limit of 10,000 words reached. It resets in "), "{limit}");
+    }
+
+    #[test]
+    fn the_limit_resets_at_midnight_utc() {
+        let day = UNIX_EPOCH + Duration::from_secs(20_000 * 86_400);
+        let at = |hours: u64, minutes: u64, seconds: u64| {
+            until_midnight_utc(day + Duration::from_secs(hours * 3600 + minutes * 60 + seconds))
+        };
+        assert_eq!(at(18, 48, 0), "5 h 12 min");
+        assert_eq!(at(18, 47, 30), "5 h 13 min");
+        assert_eq!(at(21, 0, 0), "3 h");
+        assert_eq!(at(23, 20, 0), "40 min");
+        assert_eq!(at(23, 59, 59), "1 min");
+    }
+
+    #[test]
+    fn the_system_is_named_from_os_release() {
+        let ubuntu = "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\n";
+        assert_eq!(os_release_name(ubuntu), "Ubuntu 22.04");
+        assert_eq!(os_release_name("NAME=\"Arch Linux\"\nBUILD_ID=rolling\n"), "Arch Linux");
+        assert_eq!(os_release_name(""), "Linux");
     }
 
     #[test]

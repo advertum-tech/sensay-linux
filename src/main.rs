@@ -64,6 +64,9 @@ pub enum Command {
     OpenAbout,
     /// The Settings window changed the shared settings.
     SettingsChanged,
+    /// Temporary, from the tray: a refusal from the Sensay API, shown the way
+    /// a real answer is.
+    TestError(asr::Refusal),
     Quit,
 }
 
@@ -158,8 +161,9 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
     let config = config::load();
     log::info!(
         App,
-        "settings: speech_service={} activation_key={} microphone={} api_key={}",
+        "settings: speech_service={} local_address={} activation_key={} microphone={} api_key={}",
         config.speech_service.as_str(),
+        config.local_address,
         config.activation_key,
         config.microphone,
         if config.api_key.is_empty() { "empty" } else { "set" }
@@ -207,6 +211,7 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
     // changes it through the shared settings.
     let (service_settings_tx, service_settings) = tokio::sync::watch::channel(ServiceSettings {
         service: config.speech_service,
+        local_address: config.local_address.clone(),
         api_key: config.api_key.clone(),
     });
     let recogniser = Recogniser::new(service_settings);
@@ -273,15 +278,20 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
                 }
                 Command::SettingsChanged => {
                     let wanted = shared_config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-                    if wanted.speech_service != applied.speech_service || wanted.api_key != applied.api_key {
+                    if wanted.speech_service != applied.speech_service
+                        || wanted.local_address != applied.local_address
+                        || wanted.api_key != applied.api_key
+                    {
                         log::info!(
                             App,
-                            "settings: speech_service={} api_key={}",
+                            "settings: speech_service={} local_address={} api_key={}",
                             wanted.speech_service.as_str(),
+                            wanted.local_address,
                             if wanted.api_key.is_empty() { "empty" } else { "set" }
                         );
                         service_settings_tx.send_replace(ServiceSettings {
                             service: wanted.speech_service,
+                            local_address: wanted.local_address.clone(),
                             api_key: wanted.api_key.clone(),
                         });
                     }
@@ -299,6 +309,9 @@ async fn run(mode: Mode, ui: std::sync::mpsc::Sender<UiCommand>) -> ExitCode {
                         controller.set_microphone(wanted.microphone.clone());
                     }
                     applied = wanted;
+                }
+                Command::TestError(refusal) => {
+                    errors.show(&asr::sample_refusal(refusal).message());
                 }
                 Command::Quit => {
                     log::info!(App, "quit requested");

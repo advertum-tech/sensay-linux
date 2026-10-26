@@ -83,6 +83,10 @@ pub struct Transcript {
     pub recognition_seconds: Option<f64>,
     /// Filled in for `Failed`.
     pub failure_reason: Option<String>,
+    /// What the user is shown now when it differs from `failure_reason`: a
+    /// used-up limit counts down to its reset, which would be wrong in the
+    /// history an hour later. Not stored.
+    pub notice: Option<String>,
 }
 
 impl Transcript {
@@ -99,6 +103,7 @@ impl Transcript {
             model: None,
             recognition_seconds: None,
             failure_reason: None,
+            notice: None,
         }
     }
 }

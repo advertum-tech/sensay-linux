@@ -3,7 +3,9 @@
 // id confidential and asks programs not to show it as it is, so the App ID is
 // derived from it, the same way on macOS, Windows and Linux: HMAC-SHA256 with
 // the machine id as read (UTF-8, no line break) as the key and APP_KEY as the
-// message; the first 16 bytes, written as an uppercase UUID 8-4-4-4-12.
+// message, written in the shape of the machine id: each of its characters is
+// replaced, in order, by the next hex digit of the hash, lowercase. The App
+// ID is then 32 lowercase hex digits, as the machine id is.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -27,15 +29,13 @@ fn derive(machine_id: &str) -> Option<String> {
     let mut mac = Hmac::<Sha256>::new_from_slice(machine_id.as_bytes()).ok()?;
     mac.update(APP_KEY.as_bytes());
     let digest = mac.finalize().into_bytes();
-    let hex: String = digest[..16].iter().map(|byte| format!("{byte:02X}")).collect();
-    Some(format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    ))
+    let mut digits = digest.iter().flat_map(|byte| [byte >> 4, byte & 0x0F]);
+    Some(
+        machine_id
+            .chars()
+            .map(|_| char::from_digit(u32::from(digits.next().unwrap_or(0)), 16).unwrap_or('0'))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -47,7 +47,7 @@ mod tests {
         // Worked out with Python's hmac and hashlib from the same description.
         assert_eq!(
             derive("0123456789abcdef0123456789abcdef").as_deref(),
-            Some("D6E77EE7-A1E7-6D97-74A3-8F0DE91D4B4A")
+            Some("d6e77ee7a1e76d9774a38f0de91d4b4a")
         );
     }
 }
