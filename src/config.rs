@@ -29,7 +29,7 @@ pub enum SpeechService {
 }
 
 impl SpeechService {
-    const FALLBACK: SpeechService = SpeechService::Local;
+    const FALLBACK: SpeechService = SpeechService::Parakeet;
 
     /// In the order the Settings window lists them.
     pub const ALL: [SpeechService; 3] = [SpeechService::Whisper, SpeechService::Parakeet, SpeechService::Local];
