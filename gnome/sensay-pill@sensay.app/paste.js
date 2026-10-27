@@ -107,7 +107,10 @@ function pickFormat(formats) {
 export class Paster {
     constructor() {
         this._selection = global.display.get_selection();
-        const seat = global.stage.context.get_backend().get_default_seat();
+        // GNOME 42 has no context on the stage (TypeError on Ubuntu 22.04,
+        // 24 October 2026); there the default backend gives the seat.
+        const backend = global.stage.context?.get_backend() ?? Clutter.get_default_backend();
+        const seat = backend.get_default_seat();
         this._keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
         this._timeouts = new Set();
         // One paste at a time: each holds the clipboard for half a second.
